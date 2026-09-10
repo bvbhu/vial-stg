@@ -1,0 +1,204 @@
+name: Release artifacts (build only)
+
+# 只构建，不发布。
+#
+# 上游 vial-kb/vial-gui 没有自动发布 release —— 它只有 main.yml / test.yml 两个
+# workflow，产物一律作为 workflow artifact 留存，从不创建 GitHub Release。
+# 本仓库同样只构建：在 Actions run 的 Artifacts 页下载，手动上传到 Release。
+#
+# 产物（保留 Vial 原始身份字段，见 README「身份与命名」）：
+#   Vial-v<ver>-portable.zip      Windows 免安装版
+#   Vial-v<ver>-setup.exe         Windows 安装程序（NSIS）
+#   Vial-v<ver>-x86_64.AppImage   Linux x86_64
+#   Vial-v<ver>.dmg               macOS
+#
+# 打包链路完全沿用 vial-gui 上游自己的 CI 配方，只改了产物文件名。
+# fbs / PyInstaller 官方只支持 Python 3.6（见 vial-gui/README.md），所以三个打包
+# job 全部用 Python 3.6 + vial-gui/requirements.txt，不要换成新版 Python
+# （PyInstaller 3.4 在 3.7+ 上装不上）。
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 版本号（不带 v 前缀），例如 0.7.5
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+    - id: v
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          ver="${{ inputs.version }}"
+        else
+          ver="${GITHUB_REF_NAME#v}"
+        fi
+        echo "version=$ver" >> "$GITHUB_OUTPUT"
+        echo "==> Vial-v$ver"
+
+  win:
+    runs-on: windows-2025
+    needs: meta
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.6.x'
+
+    - name: Setup venv
+      working-directory: vial-gui
+      run: |
+        python -m venv venv
+        . .\venv\Scripts\activate.ps1
+        pip install -r requirements.txt
+
+    - name: Install NSIS
+      working-directory: vial-gui
+      run: |
+        Invoke-WebRequest "https://github.com/vial-kb/vial-deps/releases/download/v1/nsis-3.06.1-setup.exe" -UserAgent "wget" -OutFile nsis-setup.exe
+        if ((Get-FileHash nsis-setup.exe -Algorithm sha256).Hash -ne "f60488a676308079bfdf6845dc7114cfd4bbff47b66be4db827b89bb8d7fdc52") { Write-Error 'SHA256 mismatch' }
+        Start-Process -FilePath "nsis-setup.exe" -ArgumentList "/S", "/D=C:\Program Files (x86)\NSIS" -NoNewWindow -Wait
+
+    - name: Install Visual C++ Redistributable
+      working-directory: vial-gui
+      run: |
+        Invoke-WebRequest -Uri "https://download.microsoft.com/download/3/2/2/3224B87F-CFA0-4E70-BDA3-3DE650EFEBA5/vcredist_x64.exe" -OutFile "vcredist_x64.exe"
+        Start-Process -FilePath "vcredist_x64.exe" -ArgumentList "/install", "/quiet", "/norestart" -Wait
+        Remove-Item "vcredist_x64.exe"
+
+    - name: fbs freeze
+      working-directory: vial-gui
+      run: |
+        . .\venv\Scripts\activate.ps1
+        fbs freeze
+
+    - name: fbs installer
+      working-directory: vial-gui
+      run: |
+        $env:Path += ";C:\Program Files (x86)\NSIS"
+        . .\venv\Scripts\activate.ps1
+        fbs installer
+
+    - name: Package
+      working-directory: vial-gui
+      run: |
+        Copy-Item "target\VialSetup.exe" "Vial-v${{ needs.meta.outputs.version }}-setup.exe"
+        Compress-Archive -Path "target\Vial" -DestinationPath "Vial-v${{ needs.meta.outputs.version }}-portable.zip"
+        Get-ChildItem Vial-*
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: win-setup
+        path: vial-gui/Vial-*-setup.exe
+        if-no-files-found: error
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: win-portable
+        path: vial-gui/Vial-*-portable.zip
+        if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-22.04
+    needs: meta
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # 上游的 Linux 打包入口：docker build + docker run 跑 _builder.sh，
+    # 里面是 fbs freeze / fbs installer / pkg2appimage misc/Vial.yml
+    - name: Build AppImage
+      working-directory: vial-gui
+      run: ./util/linux-builder/build-in-docker.sh
+
+    - name: Package
+      run: |
+        cp vial-gui/util/linux-builder/output/Vial-x86_64.AppImage "Vial-v${{ needs.meta.outputs.version }}-x86_64.AppImage"
+        ls -lah Vial-*
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: linux-appimage
+        path: Vial-*.AppImage
+        if-no-files-found: error
+
+  mac:
+    runs-on: macos-15
+    needs: meta
+    env:
+      PYTHON_VERSION: 3.6.8
+      MACOSX_DEPLOYMENT_TARGET: 10.9
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Get Python
+      run: curl https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-macosx${MACOSX_DEPLOYMENT_TARGET}.pkg -o "python.pkg"
+
+    - name: Verify download
+      run: shasum -a 256 -c <<< '4bcd53faffc98d193ef7cdccd5668de3829c702af4db45258819a84a2cab60d0 *python.pkg'
+
+    - name: Install Python
+      run: sudo installer -pkg python.pkg -target /
+
+    - name: Setup venv
+      working-directory: vial-gui
+      run: |
+        python3.6 -m venv venv
+        source venv/bin/activate
+        pip install -r requirements.txt
+
+    - name: fbs freeze
+      working-directory: vial-gui
+      run: |
+        source venv/bin/activate
+        fbs freeze
+
+    - name: Create dmg
+      working-directory: vial-gui
+      run: hdiutil create -volname Vial -srcfolder "target/Vial.app" -ov -format UDZO "../Vial-v${{ needs.meta.outputs.version }}.dmg"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: mac-dmg
+        path: Vial-*.dmg
+        if-no-files-found: error
+
+  # 把 4 个产物合并成一份，方便一次性下载后手动上传 release
+  collect:
+    runs-on: ubuntu-22.04
+    needs: [meta, win, linux, mac]
+
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        merge-multiple: true
+        path: dist
+
+    - name: List artifacts
+      run: |
+        echo "==== 待手动上传到 Release 的产物 ===="
+        ls -lah dist
+        test $(find dist -type f | wc -l) -eq 4 || { echo "期望 4 个产物，实际不是 4 个"; exit 1; }
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: Vial-v${{ needs.meta.outputs.version }}-dist
+        path: dist
+        if-no-files-found: error

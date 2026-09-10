@@ -1,5 +1,5 @@
 emsdk
 sources
 deps
-build
+src/build
 via-keymap-precompiled

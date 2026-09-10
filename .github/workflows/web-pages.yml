@@ -1,0 +1,110 @@
+name: Web -> GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    # 只有真正影响 wasm 产物的改动才触发这条长耗时流水线；改 README / LICENSE 等不触发
+    paths:
+      - 'src/**'
+      - 'patches/**'
+      - 'version.sh'
+      - 'fetch-emsdk.sh'
+      - 'fetch-deps.sh'
+      - 'build-deps.sh'
+      - 'vial-gui/src/main/python/**'
+      - 'vial-gui/src/main/resources/**'
+      - 'vial-gui/src/build/**'
+      - '.github/workflows/web-pages.yml'
+  workflow_dispatch:
+
+# 冷构建耗时以小时计，中途取消等于白跑，所以不自动掐掉上一个
+concurrency:
+  group: web-pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  web-pages:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # ---------------------------------------------------------------------------
+    # 三段缓存。全命中时只有 src/build.sh 真正跑（几分钟）；全 miss 是完整冷构建。
+    #   emsdk   -- 钉死在 commit 891b449 + SDK 3.1.10，key 用常量
+    #   sources -- 依赖源码包，sha256 由 version.sh 固定
+    #   deps    -- 交叉编译产物（CPython/Qt5/sip/PyQt5 的 wasm 静态库），可能数 GB，
+    #              continue-on-error 让它存不下时降级为冷构建而不是中断部署
+    # ---------------------------------------------------------------------------
+    - uses: actions/cache@v4
+      id: cache-emsdk
+      with:
+        path: emsdk
+        key: vialstg-emsdk-3.1.10-891b449-ubuntu-22.04
+
+    - uses: actions/cache@v4
+      id: cache-sources
+      with:
+        path: sources
+        key: vialstg-sources-${{ hashFiles('version.sh') }}-ubuntu-22.04
+
+    - uses: actions/cache@v4
+      id: cache-deps
+      continue-on-error: true
+      with:
+        path: deps
+        key: vialstg-deps-${{ hashFiles('version.sh') }}-${{ hashFiles('patches/**') }}-ubuntu-22.04
+
+    - name: Cold toolchain + cross-compile
+      if: >-
+        steps.cache-emsdk.outputs.cache-hit != 'true' ||
+        steps.cache-sources.outputs.cache-hit != 'true' ||
+        steps.cache-deps.outputs.cache-hit != 'true'
+      run: |
+        set -e
+        [ -d emsdk ]   || ./fetch-emsdk.sh
+        [ -d sources ] || ./fetch-deps.sh
+        ./build-deps.sh
+
+    - name: Re-activate emsdk after cache restore
+      if: steps.cache-emsdk.outputs.cache-hit == 'true'
+      run: ./emsdk/emsdk activate 3.1.10
+
+    # 注意：vial-gui 已经是本仓库的子目录，**不能**再 `git clone vial-gui`
+    # （上游 vial-web 的原 CI 有这一步，在这里会因目录已存在而失败）。
+    # 只有 via-keymap-precompiled 仍是外部仓库，且必须 clone 到仓库根 ——
+    # src/build.sh 按 ../../via-keymap-precompiled/ 找它。
+    - name: Clone via-keymap-precompiled
+      run: git clone --depth 1 https://github.com/vial-kb/via-keymap-precompiled.git
+
+    - name: Build
+      run: |
+        cd src
+        ./build.sh
+
+    - name: List deployable files
+      run: ls -lah src/build
+
+    # Pages 默认启用 Jekyll，会跳过以 . 开头的文件并改写部分路径；静态站点要关掉
+    - name: Disable Jekyll
+      run: touch src/build/.nojekyll
+
+    - uses: actions/upload-pages-artifact@v3
+      with:
+        path: src/build
+
+    - uses: actions/deploy-pages@v4
+      id: deployment
