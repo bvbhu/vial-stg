@@ -604,11 +604,12 @@ class AnalogTab(BasicEditor):
                 w.text = ""
                 continue
             if cfg.is_rt_enabled():
+                # 行序与行程区标尺一致：上=断开点/断开RT，下=触发点/触发RT
                 # 固定宽度：每个数字右对齐占 3 字符（前补空格），键与键之间才对得齐
-                w.text = "%3d %3d\n%3d %3d" % (cfg.actuation_point, cfg.rt_down,
-                                               cfg.release_point, cfg.rt_up)
+                w.text = "%3d %3d\n%3d %3d" % (cfg.release_point, cfg.rt_up,
+                                               cfg.actuation_point, cfg.rt_down)
             else:
-                w.text = "{}\n{}".format(cfg.actuation_point, cfg.release_point)
+                w.text = "{}\n{}".format(cfg.release_point, cfg.actuation_point)
         self.container.update()
 
     # -------------------------------------------------------------- events
