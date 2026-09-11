@@ -14,7 +14,10 @@ from hidproxy import hid
 from keycodes.keycodes import Keycode
 from keymaps import KEYMAPS
 
-tr = QCoreApplication.translate
+# 上游这里是 `tr = QCoreApplication.translate`，但整个工程从不安装 QTranslator，
+# 所以那个调用实际上永远返回英文（空壳）。这里换成 i18n 里真正生效的实现，
+# 签名与 (context, source) 保持兼容，漏译的条目会自动回退英文原文。
+from i18n import translate as tr
 
 # For Vial keyboard
 VIAL_SERIAL_NUMBER_MAGIC = "vial:f64c2b3c"
