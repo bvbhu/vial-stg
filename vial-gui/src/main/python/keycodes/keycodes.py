@@ -544,6 +544,24 @@ KEYCODES_BACKLIGHT = [
     K("RM_SPDD", "RGBM\nSpeed -", "Decrease the animation speed"),
 ]
 
+KEYCODES_BLUETOOTH = [
+    K("QK_OUTPUT_AUTO", "Auto\nHost", "Automatically pick the best host (USB when connected, otherwise BLE/2.4G)", alias=["OU_AUTO"], requires_feature="wireless"),
+    K("QK_OUTPUT_NEXT", "Next\nHost", "Cycle to the next host (USB → BLE → 2.4G)", alias=["OU_NEXT"], requires_feature="wireless"),
+    K("QK_OUTPUT_PREV", "Prev\nHost", "Cycle to the previous host", alias=["OU_PREV"], requires_feature="wireless"),
+    K("QK_OUTPUT_NONE", "No\nHost", "Disconnect from all hosts", alias=["OU_NONE"], requires_feature="wireless"),
+    K("QK_OUTPUT_USB", "USB\nHost", "Force USB (wired) host", alias=["OU_USB"], requires_feature="wireless"),
+    K("QK_OUTPUT_2P4GHZ", "2.4G\nHost", "Force 2.4 GHz wireless host (BHQ)", alias=["OU_2P4G"], requires_feature="wireless"),
+    K("QK_OUTPUT_BLUETOOTH", "BLE\nHost", "Force Bluetooth (BLE) host (BHQ)", alias=["OU_BT"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE_NEXT", "BT Next\nProfile", "Next Bluetooth profile (reserved — not yet implemented in this firmware)", alias=["BT_NEXT"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE_PREV", "BT Prev\nProfile", "Previous Bluetooth profile (reserved — not yet implemented in this firmware)", alias=["BT_PREV"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_UNPAIR", "BT\nUnpair", "Unpair current Bluetooth profile (reserved — not yet implemented in this firmware)", alias=["BT_UNPR"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE1", "BT\nProfile\n1", "Bluetooth profile 1 (reserved — not yet implemented in this firmware)", alias=["BT_PRF1"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE2", "BT\nProfile\n2", "Bluetooth profile 2 (reserved — not yet implemented in this firmware)", alias=["BT_PRF2"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE3", "BT\nProfile\n3", "Bluetooth profile 3 (reserved — not yet implemented in this firmware)", alias=["BT_PRF3"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE4", "BT\nProfile\n4", "Bluetooth profile 4 (reserved — not yet implemented in this firmware)", alias=["BT_PRF4"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE5", "BT\nProfile\n5", "Bluetooth profile 5 (reserved — not yet implemented in this firmware)", alias=["BT_PRF5"], requires_feature="wireless"),
+]
+
 KEYCODES_MEDIA = [
     K("KC_F13", "F13"),
     K("KC_F14", "F14"),
@@ -809,7 +827,8 @@ def recreate_keycodes():
 
     KEYCODES.clear()
     KEYCODES.extend(KEYCODES_SPECIAL + KEYCODES_BASIC + KEYCODES_SHIFTED + KEYCODES_ISO + KEYCODES_LAYERS +
-                    KEYCODES_BOOT + KEYCODES_MODIFIERS + KEYCODES_QUANTUM + KEYCODES_BACKLIGHT + KEYCODES_MEDIA +
+                    KEYCODES_BOOT + KEYCODES_MODIFIERS + KEYCODES_QUANTUM + KEYCODES_BACKLIGHT + KEYCODES_BLUETOOTH +
+                    KEYCODES_MEDIA +
                     KEYCODES_TAP_DANCE + KEYCODES_MACRO + KEYCODES_USER + KEYCODES_HIDDEN + KEYCODES_MIDI)
     KEYCODES_MAP.clear()
     RAWCODES_MAP.clear()

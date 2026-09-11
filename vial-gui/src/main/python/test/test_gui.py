@@ -1,3 +1,9 @@
+import os
+
+# 本文件断言的是控件上的**英文原文**（"Basic" / "Quantum" 等）。i18n 会按系统
+# locale 自动选语言，在中文系统上不钉住语言就会让 UI 测试假性失败。
+os.environ["VIAL_LANG"] = "en"  # 硬钉，不允许被外部环境覆盖
+
 import lzma
 import os.path
 import struct
@@ -13,7 +19,11 @@ from protocol.constants import CMD_VIA_GET_PROTOCOL_VERSION, CMD_VIA_VIAL_PREFIX
     CMD_VIA_MACRO_GET_BUFFER_SIZE, CMD_VIAL_QMK_SETTINGS_QUERY, CMD_VIAL_DYNAMIC_ENTRY_OP, \
     DYNAMIC_VIAL_GET_NUMBER_OF_ENTRIES, CMD_VIA_KEYMAP_GET_BUFFER, CMD_VIA_MACRO_GET_BUFFER, CMD_VIAL_GET_UNLOCK_STATUS, \
     CMD_VIA_SET_KEYCODE, DYNAMIC_VIAL_COMBO_GET, DYNAMIC_VIAL_COMBO_SET, DYNAMIC_VIAL_TAP_DANCE_GET, \
-    DYNAMIC_VIAL_TAP_DANCE_SET
+    DYNAMIC_VIAL_TAP_DANCE_SET, \
+    CMD_VIAL_ANALOG_GET_CAPS, CMD_VIAL_ANALOG_GET_KEY_CONFIG, CMD_VIAL_ANALOG_SET_KEY_CONFIG, \
+    CMD_VIAL_ANALOG_GET_KEY_READINGS, CMD_VIAL_ANALOG_CALIBRATE, CMD_VIAL_ANALOG_RESET_KEY, \
+    ANALOG_FLAG_RT_ENABLED, ANALOG_FLAG_ACTUATION_OVERRIDE, ANALOG_FLAG_CONTINUOUS, \
+    ANALOG_CAP_BOTTOM_OUT_CAL
 from widgets.square_button import SquareButton
 
 FAKE_KEYBOARD = """
@@ -79,6 +89,21 @@ class VirtualKeyboard:
         self.key_override_entries = 0
         self.alt_repeat_key_entries = 0
 
+        # ---- Vial Analog 协议模拟(0xF0-0xF5)，语义镜像固件 vial.c 翻译层 ----
+        self.analog_axis_type = 1  # hall
+        self.analog_caps = 0x3F    # 五个基础能力位 + bit5 触底校准开关
+        self.analog_bottom_out = False  # 0xF4 mode4/5 的运行态，随 caps 的 msg[7] 回报
+        # 全局默认槽(对应固件 g_analog_global：4 阈值 + RT 开关)
+        self.analog_global = {"actuation": 200, "release": 192, "rt_down": 10, "rt_up": 10, "rt": False}
+        # 每键配置：ki -> dict；出厂=跟随全局固件侧不存值，这里存"键上当前生效值"
+        self.analog_keys = {}
+        for ki in range(self.rows * self.cols):
+            self.analog_keys[ki] = {"actuation": 200, "release": 192, "rt_down": 10, "rt_up": 10,
+                                    "rt": False, "customized": False, "continuous": False,
+                                    "raw_rest": 375, "raw_full": 675}
+        self.analog_readings = {}  # ki -> (travel, raw)，测试注入
+        self.analog_cmd_log = []   # (cmd, ki) 记录，断言用；GET_CAPS 不记(无 ki)
+
     def get_keymap_buffer(self):
         output = b""
         for layer in range(self.layers):
@@ -118,6 +143,104 @@ class VirtualKeyboard:
             return b""
         raise RuntimeError("unsupported dynamic submsg 0x{:02X}".format(msg[2]))
 
+    def _analog_cfg_bytes(self, ki):
+        """打包 12 字节线格式，位语义与固件一致：bit1 OVERRIDE=非跟随全局。"""
+        if ki == 0xFFFF:
+            g = self.analog_global
+            flags = ANALOG_FLAG_RT_ENABLED if g["rt"] else 0
+            return struct.pack("<BBBBBBHHH", g["actuation"], g["release"], g["rt_down"], g["rt_up"],
+                               flags, 0, 375, 675, 0)
+        k = self.analog_keys[ki]
+        flags = 0
+        if k["rt"]:
+            flags |= ANALOG_FLAG_RT_ENABLED
+        if k["customized"]:
+            flags |= ANALOG_FLAG_ACTUATION_OVERRIDE
+        if k["continuous"]:
+            flags |= ANALOG_FLAG_CONTINUOUS
+        return struct.pack("<BBBBBBHHH", k["actuation"], k["release"], k["rt_down"], k["rt_up"],
+                           flags, 0, k["raw_rest"], k["raw_full"], 0)
+
+    def _analog_store(self, ki, act, rel, rtd, rtu, flags, raw_rest, raw_full):
+        """解包写入，镜像固件：全局槽忽略锚点/OVERRIDE；单键写即转自定义。"""
+        rt = bool(flags & ANALOG_FLAG_RT_ENABLED)
+        if ki == 0xFFFF:
+            self.analog_global = {"actuation": act, "release": rel, "rt_down": rtd, "rt_up": rtu, "rt": rt}
+            return
+        k = self.analog_keys[ki]
+        k.update({"actuation": act, "release": rel, "rt_down": rtd, "rt_up": rtu,
+                  "rt": rt, "customized": True,
+                  "continuous": bool(flags & ANALOG_FLAG_CONTINUOUS),
+                  "raw_rest": raw_rest, "raw_full": raw_full})
+
+    def vial_cmd_analog(self, msg):
+        cmd = msg[1]
+        if cmd == CMD_VIAL_ANALOG_GET_CAPS:
+            num = self.rows * self.cols
+            # 布局按协议文档：msg[0]=ver, msg[1..2]=num_keys(LE16), msg[3]=axis,
+            # msg[4]=caps, msg[5]=max_readings, msg[6]=config_size, msg[7]=触底校准开关状态
+            return struct.pack("<BHBBBBB", 2, num,
+                               self.analog_axis_type, self.analog_caps, 10, 12,
+                               1 if self.analog_bottom_out else 0)
+        # 0xF4 比其它命令多一个 mode 字节(msg[2])，键号从 msg[3] 起
+        ki_off = 3 if cmd == CMD_VIAL_ANALOG_CALIBRATE else 2
+        ki = struct.unpack_from("<H", msg, ki_off)[0]
+        self.analog_cmd_log.append((cmd, ki))
+        if cmd == CMD_VIAL_ANALOG_GET_KEY_CONFIG:
+            return self._analog_cfg_bytes(ki)
+        elif cmd == CMD_VIAL_ANALOG_SET_KEY_CONFIG:
+            act, rel, rtd, rtu, flags, _res, raw_rest, raw_full, _res2 = struct.unpack_from("<BBBBBBHHH", msg, 4)
+            self._analog_store(ki, act, rel, rtd, rtu, flags, raw_rest, raw_full)
+            return b"\x00"
+        elif cmd == CMD_VIAL_ANALOG_GET_KEY_READINGS:
+            entries = b""
+            n = 0
+            for k in range(ki, self.rows * self.cols):
+                travel, raw = self.analog_readings.get(k, (0, 0))
+                entries += struct.pack("<BH", travel, raw)
+                n += 1
+                if n == 10:
+                    break
+            return struct.pack("<B", n) + entries
+        elif cmd == CMD_VIAL_ANALOG_CALIBRATE:
+            mode = msg[2]
+            # mode 4/5：触底校准开关(纯运行态)——开启期间固件抑制全部键输出，
+            # 扫描侧只推高各键 bottom 锚点；关闭即结束，GUI 回读全部锚点
+            if mode in (4, 5):
+                self.analog_bottom_out = (mode == 4)
+                return b"\x00"
+            lo = 0 if ki == 0xFFFF else ki
+            hi = (self.rows * self.cols - 1) if ki == 0xFFFF else ki
+            sample = 0
+            for k in range(lo, hi + 1):
+                _, raw = self.analog_readings.get(k, (0, 0))
+                if mode == 0:      # SAMPLE_REST
+                    self.analog_keys[k]["raw_rest"] = raw
+                elif mode == 1:    # SAMPLE_FULL
+                    self.analog_keys[k]["raw_full"] = raw
+                elif mode == 2:    # RESET_CAL
+                    self.analog_keys[k]["raw_rest"] = 375
+                    self.analog_keys[k]["raw_full"] = 675
+                else:
+                    return b"\x01"
+                sample = raw
+            return b"\x00" + struct.pack("<H", sample)
+        elif cmd == CMD_VIAL_ANALOG_RESET_KEY:
+            g = self.analog_global
+            if ki == 0xFFFF:
+                self.analog_global = {"actuation": 200, "release": 192, "rt_down": 10, "rt_up": 10, "rt": False}
+                for k in self.analog_keys.values():
+                    k.update({"actuation": 200, "release": 192, "rt_down": 10, "rt_up": 10,
+                              "rt": False, "customized": False, "continuous": False,
+                              "raw_rest": 375, "raw_full": 675})
+            else:
+                k = self.analog_keys[ki]
+                k.update({"actuation": g["actuation"], "release": g["release"],
+                          "rt_down": g["rt_down"], "rt_up": g["rt_up"], "rt": g["rt"],
+                          "customized": False})  # 校准锚点保留
+            return b"\x00"
+        raise RuntimeError("unknown analog command 0x{:02X}".format(cmd))
+
     def vial_cmd(self, msg):
         if msg[1] == CMD_VIAL_GET_KEYBOARD_ID:
             return struct.pack("<IQ", 6, 0xF00DFACEDEADBEEF)
@@ -132,6 +255,8 @@ class VirtualKeyboard:
             return b"\xFF" * 32
         elif msg[1] == CMD_VIAL_DYNAMIC_ENTRY_OP:
             return self.vial_cmd_dynamic(msg)
+        elif CMD_VIAL_ANALOG_GET_CAPS <= msg[1] <= CMD_VIAL_ANALOG_RESET_KEY:
+            return self.vial_cmd_analog(msg)
         raise RuntimeError("unknown command for Vial protocol 0x{:02X}".format(msg[1]))
 
     def process(self, msg):
@@ -191,7 +316,10 @@ all_mw = []
 
 
 def prepare(qtbot, keyboard_json, combos=None, tap_dance=None):
-    import hidraw as hid
+    # 原来这里写死 `import hidraw as hid`，但 hidproxy 只在 linux 上用 hidraw
+    # （其它平台是 `import hid`），所以在 Windows/macOS 上补丁打到了错误的模块上。
+    # 直接取应用真正使用的那个模块对象，跨平台都能生效。
+    from hidproxy import hid
 
     vk = VirtualKeyboard(keyboard_json, combos=combos, tap_dance=tap_dance)
     MockDevice.vk = vk
@@ -480,7 +608,7 @@ def test_combos(qtbot):
     min_y = min(p.y() for p in bbox)
     max_y = max(p.y() for p in bbox)
     pos_mask = QPoint(int((min_x + max_x) / 2), int(min_y + (max_y - min_y) * 4/5))
-    pos = QPoint(bbox[0].x(), bbox[0].y())
+    pos = QPoint(int(bbox[0].x()), int(bbox[0].y()))
     qtbot.mouseClick(w[0], qt_api.QtCore.Qt.MouseButton.LeftButton, pos=pos)
     assert mw.tray_keycodes.isVisible()
 
@@ -570,7 +698,7 @@ def test_tap_dance(qtbot):
     min_y = min(p.y() for p in bbox)
     max_y = max(p.y() for p in bbox)
     pos_mask = QPoint(int((min_x + max_x) / 2), int(min_y + (max_y - min_y) * 4/5))
-    pos = QPoint(bbox[0].x(), bbox[0].y())
+    pos = QPoint(int(bbox[0].x()), int(bbox[0].y()))
     qtbot.mouseClick(w[0], qt_api.QtCore.Qt.MouseButton.LeftButton, pos=pos)
     assert mw.tray_keycodes.isVisible()
 
@@ -604,3 +732,110 @@ def test_tap_dance(qtbot):
     assert not tde.btn_save.isEnabled()
     assert td.tabText(td.currentIndex()) == "2"
     assert timeout_w.value() == 123
+
+
+def test_analog_tab(qtbot):
+    """Analog 页冒烟：caps 协商、全局模式只写全局槽、单键写带 OVERRIDE、轮询、复位。"""
+    mw, vk = prepare(qtbot, FAKE_KEYBOARD)
+
+    tab = mw.analog_tab
+    assert tab.valid()
+    assert tab.caps["version"] == 2
+    assert tab.num_keys == 4
+    assert tab.rows == 2 and tab.cols == 2
+
+    # 未选键 → 全局模式：手柄显示固件全局槽的值；行程与三个读数是无意义占位
+    assert tab.selected is None
+    assert tab.track.actuation == 200
+    assert tab.track.release == 192
+    assert tab.track.travel is None
+    assert "—" in tab.lbl_raw.text()
+    # 全局模式没有"该键"，跟随全局复选框必须禁用并勾上；触底校准开关初始跟随固件运行态
+    assert not tab.chk_follow.isEnabled() and tab.chk_follow.isChecked()
+    assert tab.btn_cal_rest.isEnabled() and tab.chk_cal_full.isEnabled()
+    assert tab.btn_reset_all.isEnabled()
+    assert tab.caps["caps"] & ANALOG_CAP_BOTTOM_OUT_CAL
+    assert tab.caps["bottom_out"] == 0 and not tab.chk_cal_full.isChecked()
+
+    # 全局调节：只允许一次 0xF2 到全局槽(0xFFFF)，绝不逐键补写——
+    # 固件侧单键写会清 FOLLOW_GLOBAL，逐键写会让全局模式永久失效
+    vk.analog_cmd_log.clear()
+    tab.track.actuation = 150
+    tab.on_slider_changed()  # 模拟拖动手柄结束（set_points 不发 changed，装载语义）
+    tab.flush_config()       # 绕过 150ms 防抖定时器直接提交
+    sets = [e for e in vk.analog_cmd_log if e[0] == CMD_VIAL_ANALOG_SET_KEY_CONFIG]
+    assert sets == [(CMD_VIAL_ANALOG_SET_KEY_CONFIG, 0xFFFF)]
+    assert vk.analog_global["actuation"] == 150
+    # 防抖前缓存已同步到全部未自定义键（显示用）
+    assert tab.configs[0].actuation_point == 150
+    assert tab.configs[3].actuation_point == 150
+    # 全局槽写入不改变键的"自定义"状态
+    assert not vk.analog_keys[0]["customized"]
+
+    # 选中一个键 → 每键模式：带 OVERRIDE 位写单键
+    w = tab._ki_widgets[2]
+    tab.container.active_key = w
+    tab.on_key_clicked()
+    assert tab.selected == 2
+    assert tab.chk_follow.isEnabled() and tab.chk_follow.isChecked()  # 固件说这键还没被自定义
+    vk.analog_cmd_log.clear()
+    tab.track.release = 100
+    tab.on_slider_changed()
+    assert not tab.chk_follow.isChecked()  # 拖动即转自定义，复选框同步取消勾选
+    tab.flush_config()
+    sets = [e for e in vk.analog_cmd_log if e[0] == CMD_VIAL_ANALOG_SET_KEY_CONFIG]
+    assert sets == [(CMD_VIAL_ANALOG_SET_KEY_CONFIG, 2)]
+    assert vk.analog_keys[2]["actuation"] == 150
+    assert vk.analog_keys[2]["release"] == 100
+    assert vk.analog_keys[2]["customized"]
+    # 锚点必须原样带回：0xF2 顺写 raw_rest/raw_full，不回带会被默认值(0/255)冲掉
+    assert vk.analog_keys[2]["raw_rest"] == 375
+    assert vk.analog_keys[2]["raw_full"] == 675
+
+    # 键面显示配置值（触发点\n断开点）
+    assert "150" in w.text and "100" in w.text
+
+    # 实时读数轮询（0xF3）：标尺行程指示 + 底部读数行
+    vk.analog_readings[2] = (128, 500)
+    tab.poll()
+    assert tab.track.travel == 128
+    assert "500" in tab.lbl_raw.text()
+
+    # 单键重置：回全局组（OVERRIDE 清除），锚点保留，UI 同步
+    tab.do_reset_key()
+    assert not vk.analog_keys[2]["customized"]
+    assert tab.configs[2].actuation_point == 150
+    assert tab.configs[2].release_point == 192
+    assert not tab.configs[2].is_customized()
+    assert tab.track.release == 192
+    assert tab.chk_follow.isChecked()  # 复位后重新跟随全局
+
+    # 复选框双向：取消勾选=按当前面板值转自定义；勾回=转回跟随全局(0xF5 单键)
+    vk.analog_cmd_log.clear()
+    tab.chk_follow.setChecked(False)
+    tab.flush_config()
+    sets = [e for e in vk.analog_cmd_log if e[0] == CMD_VIAL_ANALOG_SET_KEY_CONFIG]
+    assert sets == [(CMD_VIAL_ANALOG_SET_KEY_CONFIG, 2)]
+    assert vk.analog_keys[2]["customized"]
+    vk.analog_cmd_log.clear()
+    tab.chk_follow.setChecked(True)
+    resets = [e for e in vk.analog_cmd_log if e[0] == CMD_VIAL_ANALOG_RESET_KEY]
+    assert resets == [(CMD_VIAL_ANALOG_RESET_KEY, 2)]
+    assert not vk.analog_keys[2]["customized"]
+
+    # 触底校准开关：开=0xF4 mode4、关=mode5 并回读全部锚点；结果写状态行，不被轮询覆盖
+    vk.analog_cmd_log.clear()
+    tab.chk_cal_full.setChecked(True)
+    assert vk.analog_bottom_out is True
+    tab.chk_cal_full.setChecked(False)
+    assert vk.analog_bottom_out is False
+    cals = [e for e in vk.analog_cmd_log if e[0] == CMD_VIAL_ANALOG_CALIBRATE]
+    assert cals == [(CMD_VIAL_ANALOG_CALIBRATE, 0xFFFF), (CMD_VIAL_ANALOG_CALIBRATE, 0xFFFF)]
+    assert "sampled" in tab.lbl_status.text().lower()
+
+    # 全局重置（出厂）
+    vk.analog_cmd_log.clear()
+    tab.do_reset_all()
+    resets = [e for e in vk.analog_cmd_log if e[0] == CMD_VIAL_ANALOG_RESET_KEY]
+    assert resets == [(CMD_VIAL_ANALOG_RESET_KEY, 0xFFFF)]
+    assert tab.track.actuation == 200

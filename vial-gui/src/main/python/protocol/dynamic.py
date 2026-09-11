@@ -31,7 +31,7 @@ class ProtocolDynamic(BaseProtocol):
         for bit_index, feature in [
             (0, "caps_word"),
             (1, "layer_lock"),
-            # Add more feature bits as needed...
+            (2, "wireless"),  # BHQ 无线(蓝牙/2.4G)支持
         ]:
             if data[-1] & (1 << bit_index):
                 self.supported_features.add(feature)

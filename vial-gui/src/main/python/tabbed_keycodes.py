@@ -10,7 +10,7 @@ from widgets.display_keyboard_defs import ansi_100, ansi_80, ansi_70, iso_100, i
 from widgets.flowlayout import FlowLayout
 from keycodes.keycodes import KEYCODES_BASIC, KEYCODES_ISO, KEYCODES_MACRO, KEYCODES_LAYERS, KEYCODES_QUANTUM, \
     KEYCODES_BOOT, KEYCODES_MODIFIERS, \
-    KEYCODES_BACKLIGHT, KEYCODES_MEDIA, KEYCODES_SPECIAL, KEYCODES_SHIFTED, KEYCODES_USER, Keycode, \
+    KEYCODES_BACKLIGHT, KEYCODES_BLUETOOTH, KEYCODES_MEDIA, KEYCODES_SPECIAL, KEYCODES_SHIFTED, KEYCODES_USER, Keycode, \
     KEYCODES_TAP_DANCE, KEYCODES_MIDI, KEYCODES_BASIC_NUMPAD, KEYCODES_BASIC_NAV, KEYCODES_ISO_KR
 from widgets.square_button import SquareButton
 from util import tr, KeycodeDisplay
@@ -33,7 +33,8 @@ class AlternativeDisplay(QWidget):
             for title, code in prefix_buttons:
                 btn = SquareButton()
                 btn.setRelSize(KEYCODE_BTN_RATIO)
-                btn.setText(title)
+                # 只翻译显示文字；信号里仍发原始 code，否则 "Any" 的分支判断会失效
+                btn.setText(tr("KeycodePanel", title))
                 btn.clicked.connect(lambda st, k=code: self.keycode_changed.emit(title))
                 self.key_layout.addWidget(btn)
 
@@ -178,6 +179,7 @@ class FilteredTabbedKeycodes(QTabWidget):
                                   (mods_narrow, (KEYCODES_BOOT + KEYCODES_QUANTUM)),
                                   (None, (KEYCODES_BOOT + KEYCODES_MODIFIERS + KEYCODES_QUANTUM))]),
             SimpleTab(self, "Backlight", KEYCODES_BACKLIGHT),
+            SimpleTab(self, "Bluetooth/Wireless", KEYCODES_BLUETOOTH),
             SimpleTab(self, "App, Media and Mouse", KEYCODES_MEDIA),
             SimpleTab(self, "MIDI", KEYCODES_MIDI),
             SimpleTab(self, "Tap Dance", KEYCODES_TAP_DANCE),

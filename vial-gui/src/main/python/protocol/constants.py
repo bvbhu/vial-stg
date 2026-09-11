@@ -51,6 +51,42 @@ DYNAMIC_VIAL_KEY_OVERRIDE_SET = 0x06
 DYNAMIC_VIAL_ALT_REPEAT_KEY_GET = 0x07
 DYNAMIC_VIAL_ALT_REPEAT_KEY_SET = 0x08
 
+# ---- Vial Analog Protocol Extension (静电容/磁轴, 行程 0-255) ----
+# 固件侧见 vial-qmk-wireless/docs/vial-analog-protocol.md
+# v2：子命令从 0x0E-0x13 迁移到 0xF0-0xF5 高位段，
+#     远离基础 Vial 子命令(0x00-0x0D 起)的上游低位增长区，规避冲突。
+CMD_VIAL_ANALOG_GET_CAPS         = 0xF0
+CMD_VIAL_ANALOG_GET_KEY_CONFIG   = 0xF1
+CMD_VIAL_ANALOG_SET_KEY_CONFIG   = 0xF2
+CMD_VIAL_ANALOG_GET_KEY_READINGS = 0xF3
+CMD_VIAL_ANALOG_CALIBRATE        = 0xF4
+CMD_VIAL_ANALOG_RESET_KEY        = 0xF5
+
+ANALOG_AXIS_NONE = 0
+ANALOG_AXIS_HALL = 1
+ANALOG_AXIS_EC   = 2
+
+ANALOG_CAP_PER_KEY_ACTUATION = (1 << 0)
+ANALOG_CAP_RAPID_TRIGGER     = (1 << 1)
+ANALOG_CAP_CALIBRATION       = (1 << 2)
+ANALOG_CAP_LIVE_READINGS     = (1 << 3)
+ANALOG_CAP_PER_KEY_RELEASE   = (1 << 4)
+# bit5：固件支持 0xF4 mode4/5 触底校准开关（开启期间全部键等效 KC_NO）
+ANALOG_CAP_BOTTOM_OUT_CAL    = (1 << 5)
+
+ANALOG_FLAG_RT_ENABLED         = (1 << 0)
+ANALOG_FLAG_ACTUATION_OVERRIDE = (1 << 1)
+ANALOG_FLAG_CONTINUOUS         = (1 << 2)
+
+ANALOG_CAL_SAMPLE_REST      = 0
+ANALOG_CAL_SAMPLE_FULL      = 1
+ANALOG_CAL_RESET            = 2
+ANALOG_CAL_AUTO_PEAK        = 3
+ANALOG_CAL_BOTTOM_OUT_ON    = 4  # 触底校准模式开：全部键等效 KC_NO，逐个按满即采集
+ANALOG_CAL_BOTTOM_OUT_OFF   = 5  # 触底校准模式关
+
+ANALOG_PROTOCOL_VERSION = 2  # 与固件 VIAL_ANALOG_PROTOCOL_VERSION 对应；v2=ID 迁移到 0xF0-0xF5
+
 # how much of a macro/keymap buffer we can read/write per packet
 BUFFER_FETCH_CHUNK = 28
 

@@ -46,7 +46,7 @@ _RAW = {
     "Alt Repeat Key": "替代重复键",
     "QMK Settings": "设置",                                        # [老]
     "Matrix tester": "矩阵测试",                                   # [老]
-    "Analog": "模拟量",
+    "Analog": "行程",
     "Firmware updater": "固件更新",                                # [老]
     "About {}...": "关于 {}...",
     "In order to fully apply the theme you should restart the application.":
@@ -243,32 +243,32 @@ _RAW = {
     "Computed value: 0x{:X}": "对应键值：0x{:X}",
     "About {}": "关于 {}",
 
-    # ==================== 模拟量(磁轴/静电容) ====================
-    "Not connected / this keyboard has no analog backend (ANALOG_ENABLE)":
-        "未连接 / 该键盘没有模拟量后端（ANALOG_ENABLE）",
-    "Per-key settings": "每键参数",
-    "Global parameters": "全局参数",
+    # ==================== 模拟量(磁轴/静电容)：竖向行程标尺界面 ====================
     "Not connected": "未连接",
-    "Travel: {}/255  |  Raw ADC: {}": "行程：{}/255  |  原始 ADC：{}",
-    "Enable Rapid Trigger (RT)": "启用 Rapid Trigger (RT)",
-    "Sample rest position (all keys)": "采样释放位置（全部）",
-    "Sample bottom-out (all keys)": "采样到底位置（全部）",
-    "Auto-calibrate (all keys)": "自动校准（全部）",
-    "Reset to global default": "重置为全局默认",
-    "Reset all (factory)": "全局重置（出厂）",
-    "Axis: {} | Keys: {} | Travel: 0-255": "轴类型：{} | 键数：{} | 行程：0-255",
-    "Key #{} (row {}, col {})": "按键 #{}（行 {}，列 {}）",
-    "raw: rest={} bottom={} (calibration)": "raw: 释放={} 到底={}（校准值）",
-    "Sampled rest position raw={}": "已采样释放位置 raw={}",
-    "Sampled bottom-out raw={}": "已采样到底位置 raw={}",
-    "Auto-calibration done raw={}": "自动校准完成 raw={}",
+    "Global parameters": "全局参数",
+    ("AnalogTab", "Key #{} (row {}, col {})"): "按键 #{}（行 {}，列 {}）",
+    ("AnalogTab", "Enable Rapid Trigger (RT)"): "启用 Rapid Trigger (RT)",
+    ("AnalogTab", "In RT mode, actuation and release points act as the dead zone"):
+        "RT 模式下，触发点和断开点视为死区",
+    ("AnalogTab", "Travel"): "行程",
+    ("AnalogTab", "Raw ADC: {}  Rest: {}  Bottom: {}"): "原始ADC读数：{}  初始读数：{}  触底读数：{}",
+    ("AnalogTab", "This key follows global values"): "该键跟随全局值",
+    ("AnalogTab", "Recalibrate rest readings (all keys, don't press any key)"):
+        "重新校准全部初始读数（不要按下按键）",
+    ("AnalogTab", "Bottom-out calibration"): "触底校准",
+    ("AnalogTab", "On: all keys are disabled. Press every key fully, then switch off to sample"):
+        "开启期间全部按键失效；逐个按满所有按键，再关闭开关完成采样",
+    ("AnalogTab", "Reset all keys to defaults"): "所有键恢复默认值",
+    ("AnalogTab", "Rest readings sampled"): "已采样初始读数",
+    ("AnalogTab", "Bottom readings sampled"): "已采样触底读数",
+    ("AnalogTab", "Press every key fully, then switch off"): "请逐个按满所有按键，然后关闭开关",
+    ("AnalogTab", "Calibration failed"): "校准失败",
+    ("AnalogTab", "Calibration failed: {}"): "校准失败：{}",
+    ("AnalogTab", "All keys reset to defaults"): "所有键已恢复默认值",
     ("AnalogTab", "Actuation point"): "触发点",
     ("AnalogTab", "Release point"): "断开点",
-    ("AnalogTab", "RT down sensitivity"): "RT 下行灵敏度",
-    ("AnalogTab", "RT up sensitivity"): "RT 上行灵敏度",
-    ("AnalogTab", "none"): "无",
-    ("AnalogTab", "Hall effect"): "磁轴 (Hall)",
-    ("AnalogTab", "Electrostatic"): "静电容 (EC)",
+    ("AnalogTab", "RT down sensitivity"): "RT 触发灵敏度",
+    ("AnalogTab", "RT up sensitivity"): "RT 断开灵敏度",
 }
 
 

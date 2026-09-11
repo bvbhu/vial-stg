@@ -583,6 +583,27 @@ class keycodes_v6:
         "RM_VALD": 0x784A,
         "RM_SPDU": 0x784B,
         "RM_SPDD": 0x784C,
+
+        # ---- 连接/无线主机切换 QK_OUTPUT_* (短名 OU_*) ----
+        # 由 process_connection.c 处理，CONNECTION_ENABLE 随 BLUETOOTH_ENABLE 开启 (BHQ)
+        "QK_OUTPUT_AUTO": 0x7780,
+        "QK_OUTPUT_NEXT": 0x7781,
+        "QK_OUTPUT_PREV": 0x7782,
+        "QK_OUTPUT_NONE": 0x7783,
+        "QK_OUTPUT_USB": 0x7784,
+        "QK_OUTPUT_2P4GHZ": 0x7785,
+        "QK_OUTPUT_BLUETOOTH": 0x7786,
+
+        # ---- 蓝牙多连接档位 QK_BLUETOOTH_* (短名 BT_*) ----
+        # 注意: 本固件 process_connection.c 对它们仅 return false (预留未实现)
+        "QK_BLUETOOTH_PROFILE_NEXT": 0x7790,
+        "QK_BLUETOOTH_PROFILE_PREV": 0x7791,
+        "QK_BLUETOOTH_UNPAIR": 0x7792,
+        "QK_BLUETOOTH_PROFILE1": 0x7793,
+        "QK_BLUETOOTH_PROFILE2": 0x7794,
+        "QK_BLUETOOTH_PROFILE3": 0x7795,
+        "QK_BLUETOOTH_PROFILE4": 0x7796,
+        "QK_BLUETOOTH_PROFILE5": 0x7797,
     }
 
     masked = set()

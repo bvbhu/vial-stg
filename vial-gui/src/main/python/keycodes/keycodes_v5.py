@@ -585,6 +585,23 @@ class keycodes_v5:
         "QK_REPEAT_KEY": 0x999c0,
         "QK_ALT_REPEAT_KEY": 0x999c1,
         "MAGIC_TOGGLE_GUI": 0x999c2,
+
+        # TODO: connection/BT keycodes 在 v5 中不存在 (BHQ 板走 protocol 6)，同 RM_* 一样用假值保证 GUI 可解析
+        "QK_OUTPUT_AUTO": 0x999c3,
+        "QK_OUTPUT_NEXT": 0x999c4,
+        "QK_OUTPUT_PREV": 0x999c5,
+        "QK_OUTPUT_NONE": 0x999c6,
+        "QK_OUTPUT_USB": 0x999c7,
+        "QK_OUTPUT_2P4GHZ": 0x999c8,
+        "QK_OUTPUT_BLUETOOTH": 0x999c9,
+        "QK_BLUETOOTH_PROFILE_NEXT": 0x999ca,
+        "QK_BLUETOOTH_PROFILE_PREV": 0x999cb,
+        "QK_BLUETOOTH_UNPAIR": 0x999cc,
+        "QK_BLUETOOTH_PROFILE1": 0x999cd,
+        "QK_BLUETOOTH_PROFILE2": 0x999ce,
+        "QK_BLUETOOTH_PROFILE3": 0x999cf,
+        "QK_BLUETOOTH_PROFILE4": 0x999d0,
+        "QK_BLUETOOTH_PROFILE5": 0x999d1,
     }
 
     masked = set()

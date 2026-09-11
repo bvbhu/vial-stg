@@ -15,6 +15,11 @@ def device_changed(hwnd, msg, wp, lp):
     global g_device_changes
     if wp in [win32con.DBT_DEVICEARRIVAL, win32con.DBT_DEVICEREMOVECOMPLETE]:
         g_device_changes += 1
+    # 必须显式返回 int：pywin32 312 的 C 层 wndproc 会把 handler 返回值经
+    # PyWinObject_AsPARAM 转 LRESULT，返回 None 会每条消息刷一行
+    # "TypeError: WPARAM is simple, so must be an int object (got NoneType)"
+    # （旧版 pywin32 静默把 None 当 0，上游代码因此在 312 上开始刷屏）。
+    return 0
 
 
 class AutorefreshThreadWin(AutorefreshThread):
@@ -29,7 +34,15 @@ class AutorefreshThreadWin(AutorefreshThread):
         wc.hInstance = win32api.GetModuleHandle(None)
         wc.lpszClassName = "VIAL_DEVICE_DETECTION"
         wc.lpfnWndProc = { win32con.WM_DEVICECHANGE: device_changed }
-        class_atom = win32gui.RegisterClass(wc)
+        try:
+            class_atom = win32gui.RegisterClass(wc)
+        except Exception as e:
+            # 1410 = ERROR_CLASS_ALREADY_EXISTS。窗口类名是进程级全局的，同进程内
+            # 再启一个检测线程（检测线程重启、或测试里创建多个主窗口）就会撞码；
+            # 类已经在了，直接复用，别让它冒泡成 Qt 事件循环里的未捕获异常。
+            if getattr(e, "winerror", None) != 1410:
+                raise
+            class_atom = 0
         hwnd = win32gui.CreateWindowEx(0, "VIAL_DEVICE_DETECTION", None, 0, 0, 0, 0, 0, win32con.HWND_MESSAGE, None, None, None)
 
         hdev = win32gui.RegisterDeviceNotification(

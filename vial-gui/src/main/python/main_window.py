@@ -13,6 +13,7 @@ import sys
 from about_keyboard import AboutKeyboard
 from autorefresh.autorefresh import Autorefresh
 from editor.alt_repeat_key import AltRepeatKey
+from editor.analog_tab import AnalogTab
 from editor.combos import Combos
 from constants import WINDOW_WIDTH, WINDOW_HEIGHT
 from widgets.editor_container import EditorContainer
@@ -33,6 +34,7 @@ from vial_device import VialKeyboard
 from editor.matrix_test import MatrixTest
 
 import themes
+import i18n
 
 
 class MainWindow(QMainWindow):
@@ -85,11 +87,13 @@ class MainWindow(QMainWindow):
         self.qmk_settings = QmkSettings()
         self.matrix_tester = MatrixTest(self.layout_editor)
         self.rgb_configurator = RGBConfigurator()
+        self.analog_tab = AnalogTab(self.layout_editor)
 
         self.editors = [(self.keymap_editor, "Keymap"), (self.layout_editor, "Layout"), (self.macro_recorder, "Macros"),
                         (self.rgb_configurator, "Lighting"), (self.tap_dance, "Tap Dance"), (self.combos, "Combos"),
                         (self.key_override, "Key Overrides"), (self.alt_repeat_key, "Alt Repeat Key"),
                         (self.qmk_settings, "QMK Settings"), (self.matrix_tester, "Matrix tester"),
+                        (self.analog_tab, "Analog"),
                         (self.firmware_flasher, "Firmware updater")]
 
         Unlocker.global_layout_editor = self.layout_editor
@@ -100,13 +104,16 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(self.on_tab_changed)
         self.refresh_tabs()
 
-        no_devices = 'No devices detected. Connect a Vial-compatible device and press "Refresh"<br>' \
-                     'or select "File" → "Download VIA definitions" in order to enable support for VIA keyboards.'
+        no_devices = tr(
+            "MainWindow", 'No devices detected. Connect a Vial-compatible device and press "Refresh"<br>'
+                          'or select "File" → "Download VIA definitions" in order to enable support for VIA keyboards.')
         if sys.platform.startswith("linux"):
-            no_devices += '<br><br>On Linux you need to set up a custom udev rule for keyboards to be detected. ' \
-                          'Follow the instructions linked below:<br>' \
-                          '<a href="https://get.vial.today/manual/linux-udev.html">https://get.vial.today/manual/linux-udev.html</a>'
-        self.lbl_no_devices = QLabel(tr("MainWindow", no_devices))
+            no_devices += tr(
+                "MainWindow", '<br><br>On Linux you need to set up a custom udev rule for keyboards to be detected. '
+                              'Follow the instructions linked below:<br>'
+                              '<a href="https://get.vial.today/manual/linux-udev.html">'
+                              'https://get.vial.today/manual/linux-udev.html</a>')
+        self.lbl_no_devices = QLabel(no_devices)
         self.lbl_no_devices.setTextFormat(Qt.RichText)
         self.lbl_no_devices.setAlignment(Qt.AlignCenter)
 
@@ -233,6 +240,19 @@ class MainWindow(QMainWindow):
             if theme_group.checkedAction() is None:
                 theme_group.actions()[0].setChecked(True)
 
+        if sys.platform != "emscripten":
+            self.language_menu = self.menuBar().addMenu(tr("Menu", "Language"))
+            language_group = QActionGroup(self)
+            selected_language = i18n.get_language()
+            for code, name in i18n.languages():
+                # 语言列表显示各语言自己的写法(endonym)，所以这一处刻意不走 tr()
+                act = QAction(name, self)
+                act.triggered.connect(lambda checked, c=code: self.set_language(c))
+                act.setCheckable(True)
+                act.setChecked(selected_language == code)
+                language_group.addAction(act)
+                self.language_menu.addAction(act)
+
         about_vial_act = QAction(tr("MenuAbout", "About Vial..."), self)
         about_vial_act.triggered.connect(self.about_vial)
         self.about_keyboard_act = QAction("", self)
@@ -328,7 +348,8 @@ class MainWindow(QMainWindow):
 
         self.about_keyboard_act.setVisible(False)
         if isinstance(self.autorefresh.current_device, VialKeyboard):
-            self.about_keyboard_act.setText("About {}...".format(self.autorefresh.current_device.title()))
+            self.about_keyboard_act.setText(tr("MainWindow", "About {}...").format(
+                self.autorefresh.current_device.title()))
             self.about_keyboard_act.setVisible(True)
 
         # if unlock process was interrupted, we must finish it first
@@ -338,7 +359,7 @@ class MainWindow(QMainWindow):
 
         for e in [self.layout_editor, self.keymap_editor, self.firmware_flasher, self.macro_recorder,
                   self.tap_dance, self.combos, self.key_override, self.alt_repeat_key,
-                  self.qmk_settings, self.matrix_tester, self.rgb_configurator]:
+                  self.qmk_settings, self.matrix_tester, self.rgb_configurator, self.analog_tab]:
             e.rebuild(self.autorefresh.current_device)
 
     def refresh_tabs(self):
@@ -421,6 +442,16 @@ class MainWindow(QMainWindow):
         self.settings.setValue("theme", theme)
         msg = QMessageBox()
         msg.setText(tr("MainWindow", "In order to fully apply the theme you should restart the application."))
+        msg.exec_()
+
+    def set_language(self, code):
+        if code == i18n.get_language():
+            return
+        i18n.set_language(code)
+        self.settings.setValue("language", code)
+        msg = QMessageBox()
+        msg.setText(tr("MainWindow",
+                       "In order to fully apply the language you should restart the application."))
         msg.exec_()
 
     def on_tab_changed(self, index):
