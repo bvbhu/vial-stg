@@ -878,7 +878,15 @@ class AnalogTab(BasicEditor):
         if self.keyboard is None:
             return
         self.container.update_layout()
-        self.container.update()
+        # 切换配列会换掉一批 KeyWidget：place_widgets 按当前布局选项从
+        # widgets_for_layout 里重新挑一组放进 self.widgets（widget 对象还是
+        # 那些，但活动集合变了）。ki→widget 映射若还是旧的，受影响键的键面
+        # 参数就写到已弃用的 widget 上——新键面空着或显示别的键的参数。
+        self._build_ki_widget_map()
+        if self.selected is not None:
+            self._selected_widget = self._ki_widgets.get(self.selected)
+        self._update_all_keys_text()
+        self._render_selected_keycode()
         self.container.updateGeometry()
 
     # ------------------------------------------------------- UI <-> config
