@@ -6,7 +6,8 @@
 
 面板（参照用户参考图）：
   最左：选中键预览键帽——显示该键 0 层键码；
-  左：行程区——纵向进度条 + 0/行程N/255 刻度列 + 蓝色滑杆轨道（断开点/触发点双手柄）；
+  左：行程区——纵向进度条 + 0/行程N/255 刻度列 + 滑杆轨道（断开点/触发点双手柄，
+      轨道与手柄都由 QStyle 绘制，样式与 RT 调节条完全一致）；
   中：RT 开关、RT 触发/断开灵敏度滑块（固定窄栏）、RT 死区说明；
   右：操作按钮（跟随全局复选框 / 重新校准初始读数 / 触底校准开关 / 全部恢复默认）；
   底：原始读数一行（原始 ADC / 初始 / 触底）+ 操作结果状态行。
@@ -23,7 +24,7 @@ analog_set_global 级联刷新所有跟随键（GUI 不逐键补写）。
 """
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEvent, QRect, QRectF
-from PyQt5.QtGui import QFont, QFontMetrics, QPainter, QPalette, QColor, QPen
+from PyQt5.QtGui import QFont, QFontMetrics, QPainter, QPalette, QColor
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QStyle,
                              QStyleOptionSlider, QCheckBox, QPushButton, QSizePolicy, QApplication)
 
@@ -59,8 +60,9 @@ class TravelProgressBar(QWidget):
 
     1. 纵向进度条：比背景更暗的凹槽 + 高亮填充，填充高度 = 当前行程（0 在上、255 在下）
     2. 刻度列：顶部 0、其下"行程 N"实时读数、底部 255
-    3. 竖线轨道分三段：断开点以上 / 两点之间(死区，颜色与外侧不同) / 触发点以下；
-       断开点与触发点的手柄由 QStyle 直接绘制，尺寸和配色与 RT 滑块完全一致（拖动发 changed()）
+    3. 竖线轨道分三段：断开点以上 / 两点之间(死区) / 触发点以下。
+       轨道三段与两个手柄全部交给 QStyle 绘制（样式凹槽 + 样式填充 + 样式手柄），
+       配色、渐变、暗边与 RT 滑块逐像素同源（拖动发 changed()）
     4. 手柄名称+数值标注：两手柄挨太近时标注一上一下避让、手柄左右各让一个身位，不重合
 
     travel=None（全局模式）时进度条整条淡填充、行程读数显示占位。
@@ -91,6 +93,9 @@ class TravelProgressBar(QWidget):
         # 所以借一个隐藏的空 QSlider 做样式代理——手柄的颜色和尺寸就与 RT 栏完全同源。
         self._handle_proxy = QSlider(Qt.Horizontal, self)
         self._handle_proxy.hide()
+        # 轨道同理：借一个隐藏的竖版 QSlider 做代理，凹槽的宽度/渐变/暗边与 RT 横滑杆同源。
+        self._track_proxy = QSlider(Qt.Vertical, self)
+        self._track_proxy.hide()
         self.setMinimumSize(200, 260)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
 
@@ -204,6 +209,55 @@ class TravelProgressBar(QWidget):
         qp.restore()
         return r.width(), r.height()
 
+    # ------------------------------------------------------------ 轨道 ----
+    # 轨道与手柄同一招：交给样式绘制，配色/渐变/暗边就与 RT 横滑杆完全同源。
+    # 样式一次只画"凹槽 + 一侧填充"两段，而行程条要三段（参考图：断开点以上 /
+    # 死区 / 触发点以下），所以用同一套几何画三遍，每遍只 clip 出该露的那一段：
+    #   上段 filled=True  → upsideDown=False + sliderPosition=255：从凹槽顶端往下填
+    #   下段 filled=True  → upsideDown=True  + sliderPosition=255：一直填到凹槽底端
+    #   死区 filled=False → sliderPosition=0：整条只有凹槽（与 RT 未填充段同色）
+    # opt.rect 每次朝填充的反方向多伸 _TRACK_PAD（大于手柄尺寸）：样式的填充边界正是
+    # 卡在手柄边缘上的，把手柄推到裁剪区外，段内才能被真正填满；顺带让凹槽端头的
+    # 1px 暗边落在轨道两端，与 RT 滑杆的端头一致。
+    _TRACK_THICK = 15     # 与 RT 滑杆同厚度（那条横滑杆是 250x15）
+    _TRACK_PAD = 40       # opt.rect 朝裁剪区外多伸的长度
+
+    def _track_opt(self, filled, fill_to_bottom):
+        top = self._MARGIN
+        bot = self.height() - self._MARGIN
+        opt = QStyleOptionSlider()
+        opt.initFrom(self._track_proxy)
+        opt.rect = QRect(self._TRACK_X - self._TRACK_THICK // 2,
+                         top - self._TRACK_PAD if fill_to_bottom else top,
+                         self._TRACK_THICK, (bot - top) + self._TRACK_PAD)
+        opt.orientation = Qt.Vertical
+        opt.minimum, opt.maximum = 0, 255
+        opt.sliderPosition = opt.value = 255 if filled else 0
+        opt.upsideDown = bool(fill_to_bottom)
+        # 只要凹槽（subControls 带手柄的话，pos=0 的那个手柄会落在死区裁剪区内）
+        opt.subControls = QStyle.SC_SliderGroove
+        opt.activeSubControls = QStyle.SC_None
+        opt.state = QStyle.State_Enabled | QStyle.State_Horizontal
+        return opt
+
+    def _track_groove(self):
+        """样式给出的竖直凹槽几何（相对 self 的 x 与宽度）。"""
+        proxy = self._track_proxy
+        r = proxy.style().subControlRect(QStyle.CC_Slider, self._track_opt(False, False),
+                                         QStyle.SC_SliderGroove, proxy)
+        return r.x(), r.width()
+
+    def _draw_track(self, qp, gx, gw, y0, y1, filled, fill_to_bottom):
+        """画某一段轨道（填充段或死区凹槽段），其余部分靠 clip 挡掉。"""
+        if y1 <= y0:
+            return
+        proxy = self._track_proxy
+        qp.save()
+        qp.setClipRect(QRect(gx, y0, gw, y1 - y0), Qt.IntersectClip)
+        proxy.style().drawComplexControl(QStyle.CC_Slider, self._track_opt(filled, fill_to_bottom),
+                                         qp, proxy)
+        qp.restore()
+
     # ------------------------------------------------------------ 绘制 ----
     def paintEvent(self, ev):
         qp = QPainter(self)
@@ -246,18 +300,16 @@ class TravelProgressBar(QWidget):
                 qp.drawRoundedRect(QRectF(self._BAR_X0, top, bar_w,
                                           max(10.0, self._y_of(self.travel) - top)), 8, 8)
 
-        # 列3 手柄轨道：分三段画。两点之间是 RT 死区(迟滞带)，颜色必须与外侧两段不同
-        # 画笔必须在这里显式清零：列1/列2 在全局模式下整段不绘制，不能指望它来设
-        # NoPen——否则三段轨道会带上默认黑色描边，蓝竖线与手柄看起来就"样式异常"。
-        qp.setPen(Qt.NoPen)
-        hi = pal.color(QPalette.Highlight)
+        # 列3 手柄轨道：分三段画，两点之间是 RT 死区(迟滞带)，与外侧两段明显不同。
+        # 三段都是样式画的（与 RT 滑杆同源），坐标取整后逐段相邻，不留缝不重叠。
         y_rel = self._y_of(self.release)
         y_act = self._y_of(self.actuation)
-        for y0, y1, c in ((top, y_rel, hi),                # 静置 → 断开点
-                          (y_rel, y_act, hi.darker(190)),  # 断开点 ↔ 触发点：死区
-                          (y_act, bot, hi)):               # 触发点 → 触底
-            qp.setBrush(c)
-            qp.drawRect(QRectF(self._TRACK_X - 1, y0, 3, max(0.0, y1 - y0)))
+        gx, gw = self._track_groove()
+        ys = (int(round(top)), int(round(y_rel)), int(round(y_act)), int(round(bot)))
+        for y0, y1, filled, to_bottom in ((ys[0], ys[1], True, False),   # 静置 → 断开点
+                                          (ys[1], ys[2], False, False),  # 断开点 ↔ 触发点：死区
+                                          (ys[2], ys[3], True, True)):   # 触发点 → 触底
+            self._draw_track(qp, gx, gw, y0, y1, filled, to_bottom)
 
         # 列3/列4 手柄与标注：手柄交给样式绘制(与 RT 滑块同尺寸同配色)，标注按 _label_ys 避让
         ly_rel, ly_act = self._label_ys()
