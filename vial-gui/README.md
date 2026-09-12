@@ -4,6 +4,9 @@
 
 ### Please visit [get.vial.today](https://get.vial.today/) to get started with Vial
 
+Vial-STG is an unofficial fork of Vial maintained by Shi Ta Ge Studio
+(石塔哥工作室) — see https://github.com/bvbhu/vial-stg for releases and the source.
+
 Vial is an open-source cross-platform (Windows, Linux and Mac) GUI and a QMK fork for configuring your keyboard in real time.
 
 
@@ -15,7 +18,7 @@ Vial is an open-source cross-platform (Windows, Linux and Mac) GUI and a QMK for
 
 #### Releases
 
-Visit https://get.vial.today/ to download a binary release of Vial.
+Visit https://github.com/bvbhu/vial-stg/releases to download a binary release of Vial-STG.
 
 #### Development
 

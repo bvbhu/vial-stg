@@ -32,7 +32,7 @@ _RAW = {
     ("MenuFile", "Exit"): "退出",                                       # [老]
     ("MenuSecurity", "Lock"): "锁定",                                   # [老]
     ("MenuSecurity", "Reboot to bootloader"): "重启到固件刷写模式",      # [老]
-    ("MenuAbout", "About Vial..."): "关于 Vial...",
+    ("MenuAbout", "About Vial-STG..."): "关于 Vial-STG...",
 
     # ==================== 主窗口 / 页签名 ====================
     "Refresh": "刷新",                                             # [老]

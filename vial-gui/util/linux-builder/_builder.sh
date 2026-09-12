@@ -11,5 +11,5 @@ pip install -r requirements.txt
 fbs freeze
 fbs installer
 deactivate
-/pkg2appimage-*/pkg2appimage misc/Vial.yml
-mv out/Vial-*.AppImage /output/Vial-x86_64.AppImage
+/pkg2appimage-*/pkg2appimage misc/Vial-STG.yml
+mv out/Vial-STG-*.AppImage /output/Vial-STG-x86_64.AppImage

@@ -11,7 +11,7 @@
 不会显示空白，也不会影响 keycode 名等刻意保持英文的内容）。
 
 语言解析优先级：
-    环境变量 VIAL_LANG  >  QSettings("Vial","Vial")["language"]  >  系统 locale
+    环境变量 VIAL_LANG  >  QSettings(SETTINGS_ORG, SETTINGS_APP)["language"]  >  系统 locale
 
 注意：翻译发生在控件构造期，所以切换语言需要重启程序（与主题切换的行为一致，
 沿用同一个提示交互）。
@@ -20,6 +20,8 @@ import logging
 import os
 
 from PyQt5.QtCore import QSettings, QLocale
+
+from constants import SETTINGS_APP, SETTINGS_ORG
 
 EN = "en"
 ZH = "zh"
@@ -71,7 +73,7 @@ def _detect():
         return env
 
     try:
-        saved = _normalize(QSettings("Vial", "Vial").value("language", None))
+        saved = _normalize(QSettings(SETTINGS_ORG, SETTINGS_APP).value("language", None))
     except Exception:
         logging.exception("i18n: cannot read language setting")
         saved = None

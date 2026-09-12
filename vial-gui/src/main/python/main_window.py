@@ -15,7 +15,8 @@ from autorefresh.autorefresh import Autorefresh
 from editor.alt_repeat_key import AltRepeatKey
 from editor.analog_tab import AnalogTab
 from editor.combos import Combos
-from constants import WINDOW_WIDTH, WINDOW_HEIGHT
+from constants import (WINDOW_WIDTH, WINDOW_HEIGHT, APP_NAME, ORG_NAME, ORG_NAME_ZH,
+                       REPO_URL, SETTINGS_APP, SETTINGS_ORG)
 from widgets.editor_container import EditorContainer
 from editor.firmware_flasher import FirmwareFlasher
 from editor.key_override import KeyOverride
@@ -43,9 +44,13 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.appctx = appctx
 
+        # 标题栏：qApp 的应用名已经是 Vial-STG（fbs 从 base.json 注入），
+        # 这里显式再设一遍，免得上游哪天把 display name 的取值改掉时标题悄悄回退。
+        self.setWindowTitle(APP_NAME)
+
         self.ui_lock_count = 0
 
-        self.settings = QSettings("Vial", "Vial")
+        self.settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
         if self.settings.value("size", None):
             self.resize(self.settings.value("size"))
         else:
@@ -253,7 +258,7 @@ class MainWindow(QMainWindow):
                 language_group.addAction(act)
                 self.language_menu.addAction(act)
 
-        about_vial_act = QAction(tr("MenuAbout", "About Vial..."), self)
+        about_vial_act = QAction(tr("MenuAbout", "About {}...").format(APP_NAME), self)
         about_vial_act.triggered.connect(self.about_vial)
         self.about_keyboard_act = QAction("", self)
         self.about_keyboard_act.triggered.connect(self.about_keyboard)
@@ -331,7 +336,7 @@ class MainWindow(QMainWindow):
             self.autorefresh.select_device(self.combobox_devices.currentIndex())
         except ProtocolError:
             QMessageBox.warning(self, "", "Unsupported protocol version!\n"
-                                          "Please download latest Vial from https://get.vial.today/")
+                                          "Please download latest {} from {}".format(APP_NAME, REPO_URL))
 
         if isinstance(self.autorefresh.current_device, VialKeyboard):
             keyboard_id = self.autorefresh.current_device.keyboard.keyboard_id
@@ -469,12 +474,17 @@ class MainWindow(QMainWindow):
         self.current_tab = new_tab
 
     def about_vial(self):
-        title = "About Vial"
-        text = 'Vial {}<br><br>Python {}<br>Qt {}<br><br>' \
-               'Licensed under the terms of the<br>GNU General Public License (version 2 or later)<br><br>' \
-               '<a href="https://get.vial.today/">https://get.vial.today/</a>' \
-               .format(qApp.applicationVersion(),
-                       platform.python_version(), QT_VERSION_STR)
+        title = "About {}".format(APP_NAME)
+        text = '{} {}<br><br>' \
+                '{} {}<br><br>' \
+                'Python {}<br>Qt {}<br><br>' \
+                'Licensed under the terms of the<br>GNU General Public License (version 2 or later)<br><br>' \
+                '<a href="{}">{}</a>' \
+                .format(APP_NAME,
+                        qApp.applicationVersion(),
+                        ORG_NAME_ZH, ORG_NAME,
+                        platform.python_version(), QT_VERSION_STR,
+                        REPO_URL, REPO_URL)
 
         if sys.platform == "emscripten":
             self.msg_about = QMessageBox()

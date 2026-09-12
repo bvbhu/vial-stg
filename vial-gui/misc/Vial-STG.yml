@@ -1,0 +1,21 @@
+app: Vial-STG
+
+ingredients:
+  dist: xenial
+  sources:
+    - deb http://archive.ubuntu.com/ubuntu/ xenial main universe
+  package: Vial-STG
+  debs:
+    - ../target/Vial-STG.deb
+
+script:
+  - cat > ./AppRun <<\EOF
+  - #!/bin/sh
+  - HERE=$(dirname $(readlink -f "${0}"))
+  - export QT_QPA_PLATFORM=xcb
+  - exec "${HERE}/opt/Vial-STG/Vial-STG" "$@"
+  - EOF
+  - chmod a+x ./AppRun
+  - cp usr/share/icons/hicolor/256x256/apps/Vial-STG.png .
+  - mv usr/share/applications/Vial-STG.desktop .
+  - sed -i -e 's@^Version=.*@Version=1.0@g' Vial-STG.desktop

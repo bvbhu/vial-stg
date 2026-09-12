@@ -16,6 +16,7 @@ from fbs_runtime.application_context.PyQt5 import ApplicationContext
 
 import sys
 
+from constants import ORG_NAME
 from main_window import MainWindow
 
 
@@ -61,7 +62,9 @@ class VialApplicationContext(ApplicationContext):
         # Override the app definition in order to set WM_CLASS.
         result = QtWidgets.QApplication(sys.argv)
         result.setApplicationName(self.build_settings["app_name"])
-        result.setOrganizationDomain("vial.today")
+        # 组织名用于 QSettings 的默认归属路径；仓库没有自己的域名，所以不设
+        # organizationDomain（设了的话 Qt 会用它派生组织名，反而覆盖上面的值）。
+        result.setOrganizationName(ORG_NAME)
 
         #TODO: Qt sets applicationVersion on non-Linux platforms if the exe/pkg metadata is correctly configured.
         # https://doc.qt.io/qt-5/qcoreapplication.html#applicationVersion-prop
