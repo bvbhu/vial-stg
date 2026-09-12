@@ -66,6 +66,10 @@ def _register_cjk_font(app):
     注册失败只影响中文显示，绝不阻断启动。需要 app.get_resource 已就绪。
     """
     try:
+        # 定标基准必须在注册之前量：addApplicationFont 会改变字体族解析，
+        # 注册后再取 app.font() 的行高可能已经是新字体的值（补偿会失效）。
+        base = app.font()
+        target_h = QtGui.QFontMetrics(base).height()
         path = app.get_resource("fonts/NotoSansSC-Regular.otf")
         fid = QtGui.QFontDatabase.addApplicationFont(path)
         families = QtGui.QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
@@ -73,10 +77,24 @@ def _register_cjk_font(app):
             print("webmain: CJK font registration failed (id=%d)" % fid)
             return
         app._cjk_font_id = fid  # 持有引用，防止字体数据库句柄被回收
-        font = app.font()
+        # 尺寸补偿：界面所有几何都按 fontMetrics().height() 定标（键帽 = 行高×3.2 等），
+        # CJK 字体行高(~1.45em)比原默认西文字体(~1.17em)大，同字号换族会把整个页面
+        # 等比放大约 25%。把字号微缩到行高与换字体前一致：只动字号、不动布局常数，
+        # 页面尺寸回到引入前；用 pointSizeF（不用 pixelSize），下游 pointSize()×1.25
+        # 之类的放大逻辑（AnalogKeyboardWidget）才能照常工作。
+        font = QtGui.QFont(base)
         font.setFamily(families[0])
+        h = QtGui.QFontMetrics(font).height()
+        if 0 < target_h < h:
+            font.setPointSizeF(font.pointSizeF() * target_h / h)
+            for _ in range(50):  # 行高是整数量化值，微降步进直到不大于基准
+                if QtGui.QFontMetrics(font).height() <= target_h:
+                    break
+                font.setPointSizeF(font.pointSizeF() - 0.1)
         app.setFont(font)
-        print("webmain: CJK font active: %s" % families[0])
+        print("webmain: CJK font active: %s (%.1fpt, line height %dpx, was %dpx)" % (
+            families[0], font.pointSizeF(),
+            QtGui.QFontMetrics(font).height(), target_h))
     except Exception as e:
         print("webmain: CJK font setup error: %r" % e)
 

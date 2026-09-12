@@ -82,6 +82,10 @@ Qt WebAssembly 不带任何系统字体，中文界面（i18n）会整体渲染�
 SIL OFL 1.1，可免费商用与嵌入捆绑）拷进 preload 文件系统的
 `/usr/local/fonts/`，`webmain.py` 启动时经 `QFontDatabase.addApplicationFont`
 注册并设为应用字体；注册失败只影响中文显示，不阻断启动。
+注册时自动把字号微缩到**行高与引入前一致**：界面几何全部按
+`fontMetrics().height()` 定标（键帽 = 行高 × 3.2 等），而 CJK 字体行高
+（~1.45em）比默认西文字体（~1.17em）大，不补偿会把整个页面放大约 25%。
+补偿后页面大小与原版 vial-web 完全相同。
 许可证与出处见 [`src/fonts/OFL.txt`](src/fonts/OFL.txt)。
 （代价是 `.data` 包体 +8.3 MB；若将来在意首屏体积，可用 `pyftsubset`
 按实际文案裁剪，但裁剪版属于 Modified Version，须按 OFL 第 3 条改用
