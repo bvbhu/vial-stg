@@ -29,6 +29,7 @@ CI 里出现的 `target/Vial-STG`、`Vial-STGSetup.exe`、`Vial-STG-v<版本>-*`
 | `src/simpleeval.py`                                                     | MIT，第三方 vendored（`Copyright (C) 2013-2019 Daniel Fairhead`）     |
 | `src/coi-serviceworker.min.js`                                          | MIT，第三方 vendored（Guido Zuidhof and contributors，v0.1.7）        |
 | `src/fonts/NotoSansSC-Regular.otf`                                      | SIL OFL 1.1（Noto Sans SC 即思源黑体，未修改原版，全文见 `src/fonts/OFL.txt`） |
+| `src/fonts/Inter-Regular.ttf`                                           | SIL OFL 1.1（Inter，未修改原版，全文见 `src/fonts/OFL.txt`）                  |
 
 本仓库按 GPL-2.0-or-later 发布（PyQt5 是 GPL-3.0，整条链路只能是 GPL 系），
 全文见 `LICENSE`。
@@ -75,17 +76,21 @@ Cross-Origin-Embedder-Policy: require-corp
 
 换到能发头的主机（Cloudflare Pages / Netlify 放个 `_headers` 文件）就可以把这套去掉。
 
-#### Web 版的中文字体
+#### Web 版的界面字体（Latin 主 + CJK 回退）
 
 Qt WebAssembly 不带任何系统字体，中文界面（i18n）会整体渲染成方框。
-`src/build.sh` 把**完整未修改**的 Noto Sans SC（思源黑体的 Google 发行名，
-SIL OFL 1.1，可免费商用与嵌入捆绑）拷进 preload 文件系统的
-`/usr/local/fonts/`，`webmain.py` 启动时经 `QFontDatabase.addApplicationFont`
-注册并设为应用字体；注册失败只影响中文显示，不阻断启动。
-注册时自动把字号微缩到**行高与引入前一致**：界面几何全部按
-`fontMetrics().height()` 定标（键帽 = 行高 × 3.2 等），而 CJK 字体行高
-（~1.45em）比默认西文字体（~1.17em）大，不补偿会把整个页面放大约 25%。
-补偿后页面大小与原版 vial-web 完全相同。
+`src/build.sh` 把**完整未修改**的 Inter（Latin 主字体）与 Noto Sans SC
+（思源黑体的 Google 发行名，CJK 回退字体，SIL OFL 1.1，可免费商用与嵌入
+捆绑）拷进 preload 文件系统的 `/usr/local/fonts/`，`webmain.py` 启动时经
+`QFontDatabase.addApplicationFont` 注册，并用 `QFont.setFamilies` 设为
+**Latin 主 + CJK 逐字回退**：Qt 按主字体行高定标（键帽 = 行高 × 3.2 等），
+CJK 码位从回退字体同字号取字，不再整体缩放。注册失败只影响显示，不阻断启动。
+
+之所以不复刻旧版（把 CJK 字体直接设为应用字体再缩字号补偿）：桌面端
+（main.py）不设字体，用 Qt 默认（Windows: Segoe UI @9pt）+ 系统雅黑 CJK
+回退；旧版 CJK 字体行高 ~1.45em，同字号下页面被放大 ~25%，补偿缩字号后
+字只有 ~6pt，明显小于桌面端。Inter（~1.21em）与 Segoe UI（~1.19em）行高
+接近，9pt 下页面≈桌面端、字号同为 9pt，无需补偿。
 许可证与出处见 [`src/fonts/OFL.txt`](src/fonts/OFL.txt)。
 （代价是 `.data` 包体 +8.3 MB；若将来在意首屏体积，可用 `pyftsubset`
 按实际文案裁剪，但裁剪版属于 Modified Version，须按 OFL 第 3 条改用

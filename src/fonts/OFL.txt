@@ -6,14 +6,21 @@ https://scripts.sil.org/OFL
 
 
 本仓库使用情况（provenance）：
-- 字体：Noto Sans SC Regular（SubsetOTF/SC，即思源黑体的 Google 发行名），取自
+- 字体 1：Noto Sans SC Regular（SubsetOTF/SC，即思源黑体的 Google 发行名），取自
   https://github.com/notofonts/noto-cjk （raw.githubusercontent 下载，
   SHA-256 FAA6C9DF652116DDE789D351359F3D7E5D2285A2B2A1F04A2D7244DF706D5EA9，8,331,336 字节）
 - 分发形式：src/fonts/NotoSansSC-Regular.otf —— **未修改的原版**（Original
   Version），按 OFL 第 2 条随软件捆绑分发，附本许可证与版权声明。
   因未做修改，不涉及第 3 条对保留字体名("Source")的改版限制。
-- 用途：仅 Web 版（Qt WebAssembly 无系统字体，中文界面需自带字体；
-  build.sh 拷入 preload，webmain.py 启动时 addApplicationFont 注册）。
+- 字体 2：Inter Regular（Google Fonts Inter 发行包 static/Inter_18pt-Regular.ttf，
+  重命名文件名为 Inter-Regular.ttf，字体内容未修改），取自 Google Fonts
+  （https://fonts.google.com/specimen/Inter ，Copyright 2020 The Inter Project
+  Authors, https://github.com/rsms/inter）
+- 分发形式：src/fonts/Inter-Regular.ttf —— **未修改的原版**（Original Version），
+  按 OFL 第 2 条随软件捆绑分发，附本许可证与版权声明。
+- 用途：仅 Web 版（Qt WebAssembly 无系统字体，界面需自带字体；
+  build.sh 拷入 preload，webmain.py 启动时 addApplicationFont 注册。Inter 作
+  Latin 主字体决定行高，Noto Sans SC 作 CJK 逐字回退）。
 
 
 -----------------------------------------------------------

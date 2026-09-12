@@ -57,55 +57,57 @@ def web_get_resource(name):
     return "/usr/local/" + name
 
 
-def _register_cjk_font(app):
-    """注册随包分发的中文字体并设为应用字体。
+def _register_fonts(app):
+    """注册 Latin 主字体 + CJK 逐字回退，复刻桌面端字体结构。
 
-    Qt WebAssembly 不带系统字体，i18n 中文界面会整体渲染成方框。
-    build.sh 把完整的 Noto Sans SC（思源黑体的 Google 发行名，SIL OFL 1.1，
-    未修改原版，见仓库 src/fonts/OFL.txt）拷进 preload 的 /usr/local/fonts/。
-    注册失败只影响中文显示，绝不阻断启动。需要 app.get_resource 已就绪。
+    桌面端（main.py）不设字体、不补偿：用 Qt 默认（Windows: Segoe UI @9pt），
+    CJK 由系统回退（微软雅黑）按 Unicode 码位补绘，页面与字大小由系统字体决定。
+    Qt WebAssembly 无系统字体，若直接把 CJK 字体（思源黑体 usWin≈1.448em）设为
+    应用字体，同字号下行高比西文字体大 ~25%，整页被等比放大、被迫缩字号补偿，
+    字被缩成 ~6pt、明显小于桌面端。本函数改为复刻桌面结构：随包分发 Inter
+    （SIL OFL 1.1，Latin，~1.21em≈Segoe UI 1.189em）作主字体、Noto Sans SC 作
+    CJK 回退；setFamilies 让 Qt 用主字体行高（已验证：主字体行高，非各族最大值）、
+    CJK 码位从回退字体取字同字号绘出。字号由 main() 设为 9pt（桌面端 Qt 默认），
+    不再补偿——主字体行高≈Segoe UI@9pt，页面与字大小均贴近桌面端。
+    build.sh 把两字体拷进 preload 的 /usr/local/fonts/，许可证见 src/fonts/OFL.txt。
+    注册失败只影响显示，绝不阻断启动。需要 app.get_resource 已就绪。
     """
     try:
-        # 定标基准必须在注册之前量：addApplicationFont 会改变字体族解析，
-        # 注册后再取 app.font() 的行高可能已经是新字体的值（补偿会失效）。
-        base = app.font()
-        target_h = QtGui.QFontMetrics(base).height()
-        path = app.get_resource("fonts/NotoSansSC-Regular.otf")
-        fid = QtGui.QFontDatabase.addApplicationFont(path)
-        families = QtGui.QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
-        if not families:
-            print("webmain: CJK font registration failed (id=%d)" % fid)
+        latin_id = QtGui.QFontDatabase.addApplicationFont(app.get_resource("fonts/Inter-Regular.ttf"))
+        latin_fams = QtGui.QFontDatabase.applicationFontFamilies(latin_id) if latin_id >= 0 else []
+        cjk_id = QtGui.QFontDatabase.addApplicationFont(app.get_resource("fonts/NotoSansSC-Regular.otf"))
+        cjk_fams = QtGui.QFontDatabase.applicationFontFamilies(cjk_id) if cjk_id >= 0 else []
+        if not latin_fams:
+            # Latin 主字体缺失时退回纯 CJK（保底：至少中文不渲染成方框）
+            print("webmain: Latin font registration failed (id=%d); CJK fallback only" % latin_id)
+            if cjk_fams:
+                f = QtGui.QFont(app.font()); f.setFamily(cjk_fams[0]); app.setFont(f)
+                app._cjk_font_id = cjk_id
             return
-        app._cjk_font_id = fid  # 持有引用，防止字体数据库句柄被回收
-        # 尺寸补偿：界面所有几何都按 fontMetrics().height() 定标（键帽 = 行高×3.2 等），
-        # CJK 字体行高(~1.45em)比原默认西文字体(~1.17em)大，同字号换族会把整个页面
-        # 等比放大约 25%。把字号微缩到行高与换字体前一致：只动字号、不动布局常数，
-        # 页面尺寸回到引入前；用 pointSizeF（不用 pixelSize），下游 pointSize()×1.25
-        # 之类的放大逻辑（AnalogKeyboardWidget）才能照常工作。
-        font = QtGui.QFont(base)
-        font.setFamily(families[0])
-        h = QtGui.QFontMetrics(font).height()
-        if 0 < target_h < h:
-            font.setPointSizeF(font.pointSizeF() * target_h / h)
-            for _ in range(50):  # 行高是整数量化值，微降步进直到不大于基准
-                if QtGui.QFontMetrics(font).height() <= target_h:
-                    break
-                font.setPointSizeF(font.pointSizeF() - 0.1)
+        app._latin_font_id = latin_id  # 持有引用，防止字体数据库句柄被回收
+        if cjk_fams:
+            app._cjk_font_id = cjk_id
+        families = [latin_fams[0]] + (cjk_fams[:1] if cjk_fams else [])
+        font = QtGui.QFont(app.font())
+        font.setFamilies(families)   # Latin 主字体行高 + CJK 逐字回退，同字号不缩放
         app.setFont(font)
-        print("webmain: CJK font active: %s (%.1fpt, line height %dpx, was %dpx)" % (
-            families[0], font.pointSizeF(),
-            QtGui.QFontMetrics(font).height(), target_h))
+        print("webmain: fonts active: %r + %r (%.1fpt, line height %dpx)" % (
+            latin_fams[0], cjk_fams[0] if cjk_fams else None,
+            font.pointSizeF(), QtGui.QFontMetrics(font).height()))
     except Exception as e:
-        print("webmain: CJK font setup error: %r" % e)
+        print("webmain: font setup error: %r" % e)
 
 
 def main(app):
+    # 9pt = 桌面端 Qt 默认字号（Windows: Segoe UI @9pt）。_register_fonts 用
+    # Inter(~1.21em≈Segoe UI) 作主字体、Noto 作 CJK 回退、不补偿，页面与字大小
+    # 均贴近桌面端，避免旧行为把 CJK 字体(1.448em)设主后被迫缩字号。
     font = app.font()
-    font.setPointSize(10)
+    font.setPointSize(9)
     app.setFont(font)
 
     app.get_resource = web_get_resource
-    _register_cjk_font(app)
+    _register_fonts(app)
     with open(app.get_resource("build_settings.json"), "r") as inf:
         app.build_settings = json.loads(inf.read())
     qt_exception_hook = UncaughtHook()

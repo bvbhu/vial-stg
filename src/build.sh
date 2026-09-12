@@ -22,10 +22,13 @@ cp ../../vial-gui/src/main/resources/base/qmk_settings.json usr/local
 cp ../../vial-gui/src/build/settings/base.json usr/local/build_settings.json
 cp -r ../../vial-gui/src/main/python/* usr/local/lib/python3.11
 cp ../simpleeval.py usr/local/lib/python3.11
-# 中文界面字体：Qt WASM 不带系统字体，i18n 的中文会渲染成方框。
-# 随 preload 带完整的 Noto Sans SC（思源黑体 Google 发行名，SIL OFL 1.1，
-# 未修改的原版，许可证与出处见 src/fonts/OFL.txt），webmain.py 启动时注册。
+# 界面字体：Qt WASM 不带系统字体，i18n 的中文会渲染成方框。复刻桌面端结构
+# （Segoe UI 主 + 雅黑 CJK 回退）：Inter（SIL OFL 1.1，Latin，~1.21em≈Segoe UI）
+# 作主字体决定行高，Noto Sans SC（思源黑体 Google 发行名，SIL OFL 1.1）作
+# CJK 逐字回退、同字号不缩放；webmain.py 启动时 setFamilies 注册。9pt 不补偿，
+# 页面与字大小均贴近桌面端。两字体均未修改原版，许可证与出处见 src/fonts/OFL.txt。
 mkdir -p usr/local/fonts
+cp ../fonts/Inter-Regular.ttf usr/local/fonts/
 cp ../fonts/NotoSansSC-Regular.otf usr/local/fonts/
 emcc \
     --preload-file="./usr/local" \
