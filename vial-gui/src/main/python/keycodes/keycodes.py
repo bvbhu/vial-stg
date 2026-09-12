@@ -552,14 +552,14 @@ KEYCODES_BLUETOOTH = [
     K("QK_OUTPUT_USB", "USB\nHost", "Force USB (wired) host", alias=["OU_USB"], requires_feature="wireless"),
     K("QK_OUTPUT_2P4GHZ", "2.4G\nHost", "Force 2.4 GHz wireless host (BHQ)", alias=["OU_2P4G"], requires_feature="wireless"),
     K("QK_OUTPUT_BLUETOOTH", "BLE\nHost", "Force Bluetooth (BLE) host (BHQ)", alias=["OU_BT"], requires_feature="wireless"),
-    K("QK_BLUETOOTH_PROFILE_NEXT", "BT Next\nProfile", "Next Bluetooth profile (reserved — not yet implemented in this firmware)", alias=["BT_NEXT"], requires_feature="wireless"),
-    K("QK_BLUETOOTH_PROFILE_PREV", "BT Prev\nProfile", "Previous Bluetooth profile (reserved — not yet implemented in this firmware)", alias=["BT_PREV"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE_NEXT", "BT\nNext", "Next Bluetooth profile (reserved — not yet implemented in this firmware)", alias=["BT_NEXT"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE_PREV", "BT\nPrev", "Previous Bluetooth profile (reserved — not yet implemented in this firmware)", alias=["BT_PREV"], requires_feature="wireless"),
     K("QK_BLUETOOTH_UNPAIR", "BT\nUnpair", "Unpair current Bluetooth profile (reserved — not yet implemented in this firmware)", alias=["BT_UNPR"], requires_feature="wireless"),
-    K("QK_BLUETOOTH_PROFILE1", "BT\nProfile\n1", "Bluetooth profile 1 (reserved — not yet implemented in this firmware)", alias=["BT_PRF1"], requires_feature="wireless"),
-    K("QK_BLUETOOTH_PROFILE2", "BT\nProfile\n2", "Bluetooth profile 2 (reserved — not yet implemented in this firmware)", alias=["BT_PRF2"], requires_feature="wireless"),
-    K("QK_BLUETOOTH_PROFILE3", "BT\nProfile\n3", "Bluetooth profile 3 (reserved — not yet implemented in this firmware)", alias=["BT_PRF3"], requires_feature="wireless"),
-    K("QK_BLUETOOTH_PROFILE4", "BT\nProfile\n4", "Bluetooth profile 4 (reserved — not yet implemented in this firmware)", alias=["BT_PRF4"], requires_feature="wireless"),
-    K("QK_BLUETOOTH_PROFILE5", "BT\nProfile\n5", "Bluetooth profile 5 (reserved — not yet implemented in this firmware)", alias=["BT_PRF5"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE1", "BT1", "Bluetooth profile 1 (reserved — not yet implemented in this firmware)", alias=["BT_PRF1"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE2", "BT2", "Bluetooth profile 2 (reserved — not yet implemented in this firmware)", alias=["BT_PRF2"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE3", "BT3", "Bluetooth profile 3 (reserved — not yet implemented in this firmware)", alias=["BT_PRF3"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE4", "BT4", "Bluetooth profile 4 (reserved — not yet implemented in this firmware)", alias=["BT_PRF4"], requires_feature="wireless"),
+    K("QK_BLUETOOTH_PROFILE5", "BT5", "Bluetooth profile 5 (reserved — not yet implemented in this firmware)", alias=["BT_PRF5"], requires_feature="wireless"),
 ]
 
 KEYCODES_MEDIA = [
