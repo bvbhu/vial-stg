@@ -78,9 +78,18 @@ jobs:
     - name: Install Visual C++ Redistributable
       working-directory: vial-gui
       run: |
-        Invoke-WebRequest -Uri "https://download.microsoft.com/download/3/2/2/3224B87F-CFA0-4E70-BDA3-3DE650EFEBA5/vcredist_x64.exe" -OutFile "vcredist_x64.exe"
-        Start-Process -FilePath "vcredist_x64.exe" -ArgumentList "/install", "/quiet", "/norestart" -Wait
-        Remove-Item "vcredist_x64.exe"
+        # VC++ 2012 Update 4：老版 PyQt5 捆绑的 Qt5 依赖 msvcr110.dll，
+        # windows runner 不自带，缺它 fbs freeze 直接 FileNotFoundError
+        $u = "https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU_4"
+        foreach ($arch in @("x86","x64")) {
+          Invoke-WebRequest -Uri "$u/vcredist_$arch.exe" -OutFile "vcredist_$arch.exe"
+          Start-Process -FilePath "vcredist_$arch.exe" -ArgumentList "/install", "/quiet", "/norestart" -Wait
+          Remove-Item "vcredist_$arch.exe"
+        }
+        # VC++ 2015-2022：兜底，个别依赖 vcruntime140.dll
+        Invoke-WebRequest -Uri "https://download.microsoft.com/download/3/2/2/3224B87F-CFA0-4E70-BDA3-3DE650EFEBA5/vcredist_x64.exe" -OutFile "vcredist_2015_x64.exe"
+        Start-Process -FilePath "vcredist_2015_x64.exe" -ArgumentList "/install", "/quiet", "/norestart" -Wait
+        Remove-Item "vcredist_2015_x64.exe"
 
     - name: fbs freeze
       working-directory: vial-gui
