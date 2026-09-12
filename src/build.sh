@@ -22,6 +22,11 @@ cp ../../vial-gui/src/main/resources/base/qmk_settings.json usr/local
 cp ../../vial-gui/src/build/settings/base.json usr/local/build_settings.json
 cp -r ../../vial-gui/src/main/python/* usr/local/lib/python3.11
 cp ../simpleeval.py usr/local/lib/python3.11
+# 中文界面字体：Qt WASM 不带系统字体，i18n 的中文会渲染成方框。
+# 随 preload 带完整的 Noto Sans SC（思源黑体 Google 发行名，SIL OFL 1.1，
+# 未修改的原版，许可证与出处见 src/fonts/OFL.txt），webmain.py 启动时注册。
+mkdir -p usr/local/fonts
+cp ../fonts/NotoSansSC-Regular.otf usr/local/fonts/
 emcc \
     --preload-file="./usr/local" \
     -I ../../deps/cpython/Include/ \

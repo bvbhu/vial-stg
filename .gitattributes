@@ -1,3 +1,13 @@
+# 二进制文件必须绕开 core.autocrlf 的换行转换，否则字体/图片检出后即损坏
+*.otf binary
+*.ttf binary
+*.ttc binary
+*.woff binary
+*.woff2 binary
+*.png binary
+*.ico binary
+*.icns binary
+*.svg text eol=lf
 *.otf filter=lfs diff=lfs merge=lfs -text
 *.ttf filter=lfs diff=lfs merge=lfs -text
 *.ttc filter=lfs diff=lfs merge=lfs -text

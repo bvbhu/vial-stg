@@ -3,7 +3,7 @@ import os
 
 import traceback
 
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 from PyQt5.QtCore import pyqtSignal
 
 import sys
@@ -57,12 +57,37 @@ def web_get_resource(name):
     return "/usr/local/" + name
 
 
+def _register_cjk_font(app):
+    """注册随包分发的中文字体并设为应用字体。
+
+    Qt WebAssembly 不带系统字体，i18n 中文界面会整体渲染成方框。
+    build.sh 把完整的 Noto Sans SC（思源黑体的 Google 发行名，SIL OFL 1.1，
+    未修改原版，见仓库 src/fonts/OFL.txt）拷进 preload 的 /usr/local/fonts/。
+    注册失败只影响中文显示，绝不阻断启动。需要 app.get_resource 已就绪。
+    """
+    try:
+        path = app.get_resource("fonts/NotoSansSC-Regular.otf")
+        fid = QtGui.QFontDatabase.addApplicationFont(path)
+        families = QtGui.QFontDatabase.applicationFontFamilies(fid) if fid >= 0 else []
+        if not families:
+            print("webmain: CJK font registration failed (id=%d)" % fid)
+            return
+        app._cjk_font_id = fid  # 持有引用，防止字体数据库句柄被回收
+        font = app.font()
+        font.setFamily(families[0])
+        app.setFont(font)
+        print("webmain: CJK font active: %s" % families[0])
+    except Exception as e:
+        print("webmain: CJK font setup error: %r" % e)
+
+
 def main(app):
     font = app.font()
     font.setPointSize(10)
     app.setFont(font)
 
     app.get_resource = web_get_resource
+    _register_cjk_font(app)
     with open(app.get_resource("build_settings.json"), "r") as inf:
         app.build_settings = json.loads(inf.read())
     qt_exception_hook = UncaughtHook()

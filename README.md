@@ -28,6 +28,7 @@ CI 里出现的 `target/Vial-STG`、`Vial-STGSetup.exe`、`Vial-STG-v<版本>-*`
 | `src/`、`patches/`、`fetch-*.sh`、`build-deps.sh`、`version.sh` | 来自`vial-kb/vial-web`，**上游未声明许可证**                    |
 | `src/simpleeval.py`                                                     | MIT，第三方 vendored（`Copyright (C) 2013-2019 Daniel Fairhead`）     |
 | `src/coi-serviceworker.min.js`                                          | MIT，第三方 vendored（Guido Zuidhof and contributors，v0.1.7）        |
+| `src/fonts/NotoSansSC-Regular.otf`                                      | SIL OFL 1.1（Noto Sans SC 即思源黑体，未修改原版，全文见 `src/fonts/OFL.txt`） |
 
 本仓库按 GPL-2.0-or-later 发布（PyQt5 是 GPL-3.0，整条链路只能是 GPL 系），
 全文见 `LICENSE`。
@@ -73,6 +74,18 @@ Cross-Origin-Embedder-Policy: require-corp
 （SW 接管后会自动刷新一次）——否则首次访问仍会在 SW 生效前撞上同一个崩溃。
 
 换到能发头的主机（Cloudflare Pages / Netlify 放个 `_headers` 文件）就可以把这套去掉。
+
+#### Web 版的中文字体
+
+Qt WebAssembly 不带任何系统字体，中文界面（i18n）会整体渲染成方框。
+`src/build.sh` 把**完整未修改**的 Noto Sans SC（思源黑体的 Google 发行名，
+SIL OFL 1.1，可免费商用与嵌入捆绑）拷进 preload 文件系统的
+`/usr/local/fonts/`，`webmain.py` 启动时经 `QFontDatabase.addApplicationFont`
+注册并设为应用字体；注册失败只影响中文显示，不阻断启动。
+许可证与出处见 [`src/fonts/OFL.txt`](src/fonts/OFL.txt)。
+（代价是 `.data` 包体 +8.3 MB；若将来在意首屏体积，可用 `pyftsubset`
+按实际文案裁剪，但裁剪版属于 Modified Version，须按 OFL 第 3 条改用
+非保留字体名。）
 
 ### 桌面版
 
