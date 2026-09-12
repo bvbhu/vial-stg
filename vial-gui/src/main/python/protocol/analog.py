@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Vial Analog Protocol Extension 客户端 (0xF0-0xF5)。
+"""Vial Analog Protocol Extension 客户端 (0xF0-0xF6)。
 
 固件侧契约见 vial-qmk-wireless/docs/vial-analog-protocol.md。
 行程单位 0-255(释放≈0 / 到底≈255)，轴体无关(Hall/EC 共用)。
@@ -10,7 +10,7 @@ import struct
 from protocol.constants import CMD_VIA_VIAL_PREFIX, CMD_VIAL_ANALOG_GET_CAPS, \
     CMD_VIAL_ANALOG_GET_KEY_CONFIG, CMD_VIAL_ANALOG_SET_KEY_CONFIG, \
     CMD_VIAL_ANALOG_GET_KEY_READINGS, CMD_VIAL_ANALOG_CALIBRATE, CMD_VIAL_ANALOG_RESET_KEY, \
-    ANALOG_FLAG_ACTUATION_OVERRIDE
+    CMD_VIAL_ANALOG_PERSIST_COMMIT, ANALOG_FLAG_ACTUATION_OVERRIDE
 
 ANALOG_CONFIG_SIZE = 12
 
@@ -55,7 +55,7 @@ class AnalogKeyConfig:
 
 
 class ProtocolAnalog:
-    """混入类：挂到 Keyboard 上，提供 0xF0-0xF5 命令封装。"""
+    """混入类：挂到 Keyboard 上，提供 0xF0-0xF6 命令封装。"""
 
     def analog_get_caps(self):
         data = self.usb_send(self.dev, struct.pack("BB", CMD_VIA_VIAL_PREFIX, CMD_VIAL_ANALOG_GET_CAPS),
@@ -86,7 +86,7 @@ class ProtocolAnalog:
         return self.analog_get_key_config(0xFFFF)
 
     def analog_set_global_config(self, cfg):
-        """写固件 EEPROM 全局默认配置（固件自动清 ACTUATION_OVERRIDE 位）。"""
+        """写固件全局默认配置（v3：仅改 RAM，点"保存"后才落 EEPROM；固件自动清 ACTUATION_OVERRIDE 位）。"""
         return self.analog_set_key_config(0xFFFF, cfg)
 
     def analog_get_key_readings(self, start_ki):
@@ -110,5 +110,15 @@ class ProtocolAnalog:
 
     def analog_reset_key(self, ki):
         data = self.usb_send(self.dev, struct.pack("<BBH", CMD_VIA_VIAL_PREFIX, CMD_VIAL_ANALOG_RESET_KEY, ki),
+                             retries=20)
+        return data[0] == 0
+
+    def analog_persist_commit(self):
+        """v3(0xF6)：把当前 RAM 中的模拟配置全量提交到 EEPROM(GUI"保存"按钮)。
+
+        固件按记录比对后仅对差异页做真实擦写，重复保存不额外磨损。旧固件无此命令，
+        应答是回显——调用方须以 0xF0 version>=3 为准，不得对 v2 固件发本命令。
+        """
+        data = self.usb_send(self.dev, struct.pack("BB", CMD_VIA_VIAL_PREFIX, CMD_VIAL_ANALOG_PERSIST_COMMIT),
                              retries=20)
         return data[0] == 0

@@ -5,27 +5,31 @@
 可解析布局编辑选项），下方是参数面板。
 
 面板（参照用户参考图）：
+  最左：选中键预览键帽——显示该键 0 层键码；
   左：行程区——纵向进度条 + 0/行程N/255 刻度列 + 蓝色滑杆轨道（断开点/触发点双手柄）；
   中：RT 开关、RT 触发/断开灵敏度滑块（固定窄栏）、RT 死区说明；
   右：操作按钮（跟随全局复选框 / 重新校准初始读数 / 触底校准开关 / 全部恢复默认）；
   底：原始读数一行（原始 ADC / 初始 / 触底）+ 操作结果状态行。
 
-选中按键时：键面显示该键的配置值，标尺行程指示与底部读数实时刷新。
+选中按键时：键盘区键面始终显示配置参数（触发/断开点），该键 0 层键码只显示在
+面板最左的预览键帽上；标尺行程指示与底部读数实时刷新。
 未选中按键时：全局参数模式——行程与三个读数显示为无意义占位（"—"），
-手柄显示固件 EEPROM 全局槽的值；调节经 0xF2/0xFFFF 写全局槽，由固件
+手柄显示固件 EEPROM 全局槽的值；调节经 0xF2/0xFFFF 写全局槽 RAM，由固件
 analog_set_global 级联刷新所有跟随键（GUI 不逐键补写）。
+(v3 固件)0xF2 只改 RAM 不落盘：点"保存到 EEPROM"(0xF6) 才写入 EEPROM，
+一轮调节压成一次 flash 提交；校准(0xF4)/恢复默认(0xF5)仍即时落盘。
 
 协议见 protocol/analog.py 与 vial-qmk-wireless/docs/vial-analog-protocol.md。
 """
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEvent, QRect, QRectF
-from PyQt5.QtGui import QFont, QFontMetrics, QPainter, QPalette, QColor
+from PyQt5.QtGui import QFont, QFontMetrics, QPainter, QPalette, QColor, QPen
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QStyle,
-                             QStyleOptionSlider, QCheckBox, QPushButton, QSizePolicy)
+                             QStyleOptionSlider, QCheckBox, QPushButton, QSizePolicy, QApplication)
 
 from editor.basic_editor import BasicEditor
-from util import tr
-from widgets.keyboard_widget import KeyboardWidget
+from util import tr, KeycodeDisplay
+from widgets.keyboard_widget import KeyboardWidget, KeyWidget
 from protocol.constants import (ANALOG_AXIS_NONE, ANALOG_FLAG_RT_ENABLED,
                                 ANALOG_FLAG_ACTUATION_OVERRIDE,
                                 ANALOG_CAL_SAMPLE_REST, ANALOG_CAL_SAMPLE_FULL,
@@ -33,6 +37,21 @@ from protocol.constants import (ANALOG_AXIS_NONE, ANALOG_FLAG_RT_ENABLED,
                                 ANALOG_CAP_BOTTOM_OUT_CAL,
                                 ANALOG_PROTOCOL_VERSION)
 from protocol.analog import AnalogKeyConfig
+from unlocker import Unlocker
+from constants import (KEY_SIZE_RATIO, KEY_SPACING_RATIO, KEY_ROUNDNESS,
+                       SHADOW_TOP_PADDING, SHADOW_BOTTOM_PADDING)
+
+
+def _retain_space(widget):
+    """隐藏时保留占位。
+
+    面板里凡是会"按状态出现/消失"的控件都要走这里：隐藏只能留白，
+    绝不允许把旁边的控件挤动（用户要求：隐藏内容不要影响布局）。
+    """
+    sp = widget.sizePolicy()
+    sp.setRetainSizeWhenHidden(True)
+    widget.setSizePolicy(sp)
+    return widget
 
 
 class TravelProgressBar(QWidget):
@@ -63,6 +82,9 @@ class TravelProgressBar(QWidget):
         self.actuation = 200
         self.release = 192
         self.travel = None  # None = 全局模式，行程读数显示占位
+        # 列1/列2（行程进度条 + 行程读数）是否绘制：全局模式下这两列无意义，
+        # 但列3/列4 的触发/断开设置轨与手柄必须保留。只影响绘制，不改尺寸/布局。
+        self._travel_cols = True
         self._drag = None   # "act" | "rel" | None
         # 手柄代理控件：QSS 的 "QSlider::handle" 规则是按控件类名匹配的，
         # 直接把本控件当 widget 传给样式会退化成基础样式（颜色对不上），
@@ -84,6 +106,17 @@ class TravelProgressBar(QWidget):
         """轮询更新行程指示（None 隐藏）。"""
         self.travel = travel
         self.update()
+
+    def set_travel_cols_visible(self, visible):
+        """显隐"行程进度条 + 行程 N 读数"两列（全局模式隐藏这两列）。
+
+        触发/断开设置轨与手柄（列3/列4）不受影响——全局模式下照样要能调。
+        仅切换绘制、不改变控件尺寸，因此不会挤动布局。
+        """
+        visible = bool(visible)
+        if self._travel_cols != visible:
+            self._travel_cols = visible
+            self.update()
 
     # ------------------------------------------------------------ 几何 ----
     def _y_of(self, v):
@@ -181,34 +214,42 @@ class TravelProgressBar(QWidget):
         bot = self.height() - self._MARGIN
         bar_w = self._BAR_X1 - self._BAR_X0
 
-        # 列2 刻度：顶 0、其下"行程 N"实时读数、底 255
-        qp.setPen(text_color)
-        qp.drawText(QRect(self._SCALE_X, top - 2, 54, 16), Qt.AlignLeft | Qt.AlignVCenter, "0")
-        qp.drawText(QRect(self._SCALE_X, bot - 14, 54, 16), Qt.AlignLeft | Qt.AlignVCenter, "255")
-        qp.drawText(QRect(self._SCALE_X, top + 20, 54, 16), Qt.AlignLeft | Qt.AlignVCenter,
-                    tr("AnalogTab", "Travel"))
-        qp.drawText(QRect(self._SCALE_X, top + 38, 54, 20), Qt.AlignLeft | Qt.AlignTop,
-                    "—" if self.travel is None else str(self.travel))
+        # 列1/列2（行程进度条 + 行程读数）：仅在选中按键时绘制。
+        # 全局模式下"当前行程"对全局槽没有意义（用户图1 指的就是这两列），
+        # 但列3/列4 的触发/断开设置轨与手柄必须保留——那正是全局参数本身。
+        # 只跳过绘制、不改尺寸，所以隐藏这两列不会影响布局。
+        if self._travel_cols:
+            # 列2 刻度：顶 0、其下"行程 N"实时读数、底 255
+            qp.setPen(text_color)
+            qp.drawText(QRect(self._SCALE_X, top - 2, 54, 16), Qt.AlignLeft | Qt.AlignVCenter, "0")
+            qp.drawText(QRect(self._SCALE_X, bot - 14, 54, 16), Qt.AlignLeft | Qt.AlignVCenter, "255")
+            qp.drawText(QRect(self._SCALE_X, top + 20, 54, 16), Qt.AlignLeft | Qt.AlignVCenter,
+                        tr("AnalogTab", "Travel"))
+            qp.drawText(QRect(self._SCALE_X, top + 38, 54, 20), Qt.AlignLeft | Qt.AlignTop,
+                        "—" if self.travel is None else str(self.travel))
 
-        # 列1 行程进度条：比背景更暗的凹槽 + 高亮填充（0 在上，按下后向下生长）
-        # 注意：本主题下 Button 与 Window 同色、Dark 反而是浅灰，都不能当凹槽，
-        # 所以凹槽按窗口色现算 darker()，保证任何主题下都比背景暗（参考图即如此）
-        groove = pal.color(QPalette.Window).darker(190)
-        qp.setPen(Qt.NoPen)
-        qp.setBrush(groove)
-        qp.drawRoundedRect(QRectF(self._BAR_X0, top, bar_w, bot - top), 8, 8)
-        if self.travel is None:
-            # 全局模式：行程不适用，整条淡填充占位
-            faded = QColor(groove)
-            faded.setAlpha(150)
-            qp.setBrush(faded)
+            # 列1 行程进度条：比背景更暗的凹槽 + 高亮填充（0 在上，按下后向下生长）
+            # 注意：本主题下 Button 与 Window 同色、Dark 反而是浅灰，都不能当凹槽，
+            # 所以凹槽按窗口色现算 darker()，保证任何主题下都比背景暗（参考图即如此）
+            groove = pal.color(QPalette.Window).darker(190)
+            qp.setPen(Qt.NoPen)
+            qp.setBrush(groove)
             qp.drawRoundedRect(QRectF(self._BAR_X0, top, bar_w, bot - top), 8, 8)
-        elif self.travel > 0:
-            qp.setBrush(pal.color(QPalette.Highlight))
-            qp.drawRoundedRect(QRectF(self._BAR_X0, top, bar_w,
-                                      max(10.0, self._y_of(self.travel) - top)), 8, 8)
+            if self.travel is None:
+                # 全局模式：行程不适用，整条淡填充占位
+                faded = QColor(groove)
+                faded.setAlpha(150)
+                qp.setBrush(faded)
+                qp.drawRoundedRect(QRectF(self._BAR_X0, top, bar_w, bot - top), 8, 8)
+            elif self.travel > 0:
+                qp.setBrush(pal.color(QPalette.Highlight))
+                qp.drawRoundedRect(QRectF(self._BAR_X0, top, bar_w,
+                                          max(10.0, self._y_of(self.travel) - top)), 8, 8)
 
         # 列3 手柄轨道：分三段画。两点之间是 RT 死区(迟滞带)，颜色必须与外侧两段不同
+        # 画笔必须在这里显式清零：列1/列2 在全局模式下整段不绘制，不能指望它来设
+        # NoPen——否则三段轨道会带上默认黑色描边，蓝竖线与手柄看起来就"样式异常"。
+        qp.setPen(Qt.NoPen)
         hi = pal.color(QPalette.Highlight)
         y_rel = self._y_of(self.release)
         y_act = self._y_of(self.actuation)
@@ -281,6 +322,117 @@ class TravelProgressBar(QWidget):
         super().mouseReleaseEvent(ev)
 
 
+class _UnitKeyDesc:
+    """标准 1u 键的占位描述：只为借用 KeyWidget 的真实几何与绘制路径。"""
+
+    x = y = 0.0
+    x2 = y2 = 0.0
+    width = height = 1.0
+    width2 = height2 = 1.0
+    rotation_angle = rotation_x = rotation_y = 0.0
+
+
+class KeycapPreview(QWidget):
+    """参数面板左侧的选中键预览键帽。
+
+    键盘区键面始终显示配置参数（触发/断开点）；选中键的 0 层键码只显示在这里。
+
+    几何与配色复刻"键位映射"页的键帽（KeyboardWidget）：
+      **尺寸、圆角、阴影全部借用键盘组件的真实几何** —— 内部持有一个标准 1u 的
+      KeyWidget（与键盘区同一套代码、同一个布局字体行高），绘制也直接用它的
+      background/foreground 路径，因此与键盘区键帽**逐像素同样大小**。
+      文字仍用控件自身字体、原字号居中绘制（不随键帽缩放），并保留键码标签自带的
+      换行（如 "Locking\\nCaps" 渲染成两行）。
+    配色：键帽底 = Button、键帽面 = Button.lighter(120)、文字 = ButtonText；
+    按下时整帽套 Highlight（与键盘区"按下变蓝"同一套色）。
+    """
+
+    _CAP_SCALE = 1.0  # 相对键盘区键帽的倍数：1.0 = 与键盘区键帽完全同样大小
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._text = ""
+        self._pressed = False
+        self._has_key = False
+        self._scale_source = None  # fn() -> 键盘区布局字体行高
+        self._kw = None
+        # 隐藏时保留占位：键帽出现/消失不得挤动面板布局
+        sp = self.sizePolicy()
+        sp.setRetainSizeWhenHidden(True)
+        self.setSizePolicy(sp)
+        self._apply_metrics()
+
+    def set_scale_source(self, fn):
+        """fn() 返回键盘区的布局字体行高；据此把键帽做成与键盘区键帽同样大小。"""
+        self._scale_source = fn
+        self._apply_metrics()
+
+    def _apply_metrics(self):
+        """重建 1u KeyWidget：尺寸/圆角/阴影全部取自键盘组件的同一套几何代码。
+
+        这里只改控件尺寸、不改字体：文字始终取控件自身字体，
+        所以键帽尺寸与键盘区对齐后文字也不会被缩放。
+        """
+        scale = float(self.fontMetrics().height())
+        if self._scale_source is not None:
+            try:
+                scale = float(self._scale_source()) or scale
+            except Exception:
+                pass
+        self._kw = KeyWidget(_UnitKeyDesc(), scale)
+        self.setFixedSize(max(16, int(round(self._kw.w * self._CAP_SCALE))),
+                          max(16, int(round(self._kw.h * self._CAP_SCALE))))
+
+    def changeEvent(self, ev):
+        if ev.type() == QEvent.FontChange:
+            self._apply_metrics()
+        super().changeEvent(ev)
+
+    def set_key(self, text):
+        """text=None 表示当前无选中键（全局模式），隐藏键帽。"""
+        self._has_key = text is not None
+        self._text = text or ""
+        self._pressed = False
+        self.setVisible(self._has_key)
+        self.update()
+
+    def set_pressed(self, pressed):
+        pressed = bool(pressed) and self._has_key
+        if self._pressed != pressed:
+            self._pressed = pressed
+            self.update()
+
+    def paintEvent(self, _ev):
+        kw = self._kw
+        if kw is None:
+            return
+        qp = QPainter(self)
+        qp.setRenderHint(QPainter.Antialiasing)
+
+        pal = QApplication.palette()
+        base = pal.color(QPalette.Button)
+        face = base.lighter(120)
+        if self._pressed:
+            base = pal.color(QPalette.Highlight)
+            face = base.lighter(120)
+
+        # 键帽底与键帽面：直接画 KeyWidget 算好的真实路径，
+        # 尺寸/圆角/阴影与键盘区键帽逐像素同源（不再自己造几何）
+        qp.setPen(Qt.NoPen)
+        qp.setBrush(base)
+        qp.drawPath(kw.background_draw_path)
+        qp.setBrush(face)
+        qp.drawPath(kw.foreground_draw_path)
+
+        # 键码文字：用控件自身字体（与键盘区键面同字号）、居中、保留标签自带的
+        # 换行；文字不随键帽尺寸缩放，长键码靠 \n 分成多行显示
+        if self._text:
+            qp.setPen(pal.color(QPalette.ButtonText))
+            qp.setFont(self.font())
+            qp.drawText(kw.text_rect, Qt.AlignCenter, self._text)
+        qp.end()
+
+
 class AnalogKeyboardWidget(KeyboardWidget):
     """Analog tab 专用键盘组件：键体放大 key_scale 倍，字号不变。
 
@@ -298,6 +450,16 @@ class AnalogKeyboardWidget(KeyboardWidget):
         if ev.type() == QEvent.LayoutRequest and self._suppressing:
             return True
         return super().event(ev)
+
+    def layout_scale(self):
+        """本组件布局用的字体行高（键位几何 = 该值 × KEY_SIZE_RATIO 等常数）。
+
+        预览键帽靠它把自己做成"和键盘区键帽同样大小"，所以必须与 update_layout
+        里实际用的放大字体一致。
+        """
+        f = QFont(self._base_font)
+        f.setPointSize(round(f.pointSize() * self._key_scale))
+        return float(QFontMetrics(f).height())
 
     def update_layout(self):
         if self._suppressing:
@@ -337,9 +499,13 @@ class AnalogTab(BasicEditor):
         self._all_configs_loaded = False  # 全局模式：是否已加载全部键配置
         self._global_cfg = None  # 全局默认配置缓存（固件 0xFFFF 槽）
         self._loading_ui = False  # 程序化装载 UI 期间抑制 on_slider_changed
+        self._active = False      # 本标签当前是否激活(显示中)，决定 rebuild 后是否重启轮询
+        # v3 协议保存语义：_dirty=RAM 有改动未落盘；_save_supported=固件支持 0xF6
+        self._dirty = False
+        self._save_supported = False
 
         self._timer = QTimer()
-        self._timer.setInterval(40)
+        self._timer.setInterval(20)
         self._timer.timeout.connect(self.poll)
 
         self._flush_timer = QTimer()
@@ -374,17 +540,37 @@ class AnalogTab(BasicEditor):
         self.lbl_key.setStyleSheet("font-weight: bold;")
         pv.addWidget(self.lbl_key)
 
+        # 解锁提示行：secure 固件下 matrix_poll 受 unlock 门控才需要；
+        # 本固件 VIAL_INSECURE=yes 时 get_unlock_status 恒 1，此行永不显示。
+        self.unlock_lbl = QLabel(tr("AnalogTab", "Unlock the keyboard to show key presses:"))
+        self.unlock_btn = QPushButton(tr("AnalogTab", "Unlock"))
+        self.unlock_btn.clicked.connect(self.unlock)
+        unlock_row = QHBoxLayout()
+        unlock_row.addStretch()
+        unlock_row.addWidget(self.unlock_lbl)
+        unlock_row.addWidget(self.unlock_btn)
+        pv.addLayout(unlock_row)
+        _retain_space(self.unlock_lbl)
+        _retain_space(self.unlock_btn)
+        self.unlock_lbl.hide()
+        self.unlock_btn.hide()
+
         # 详情容器：未连接时隐藏
         self._detail_panel = QWidget()
         dv = QVBoxLayout(self._detail_panel)
         dv.setContentsMargins(0, 0, 0, 0)
 
         main_row = QHBoxLayout()
-        # 左右等量留白 → 三栏整体居中
+        # 最左：选中键预览键帽——显示该键 0 层键码（键盘区键面只显示配置参数）
+        self.keycap = KeycapPreview()
+        # 键帽尺寸与键盘区键帽完全一致：直接问键盘组件要它的布局字体行高
+        self.keycap.set_scale_source(self.container.layout_scale)
+        main_row.addWidget(self.keycap, 0, Qt.AlignTop)
+        # 键帽与行程区之间留白 + 右端等量留白 → 其后三栏整体居中
         main_row.addStretch(1)
 
         # 左：纵向行程进度条
-        self.track = TravelProgressBar()
+        self.track = _retain_space(TravelProgressBar())
         self.track.changed.connect(self.on_slider_changed)
         main_row.addWidget(self.track)
 
@@ -425,7 +611,7 @@ class AnalogTab(BasicEditor):
 
         # "该键跟随全局值"移到 RT 栏下方（用户要求）
         mid_col.addStretch(1)
-        self.chk_follow = QCheckBox(tr("AnalogTab", "This key follows global values"))
+        self.chk_follow = _retain_space(QCheckBox(tr("AnalogTab", "This key follows global values")))
         self.chk_follow.toggled.connect(self.on_follow_toggled)
         mid_col.addWidget(self.chk_follow)
         main_row.addWidget(mid_box)
@@ -433,30 +619,40 @@ class AnalogTab(BasicEditor):
         main_row.insertSpacing(2, 30)
         main_row.addSpacing(24)
 
-        # 右：操作按钮
+        # 右：操作按钮（按钮只放短动作名，注意事项一律走下方灰字）
         btn_col = QVBoxLayout()
-        self.btn_cal_rest = QPushButton(tr("AnalogTab", "Recalibrate rest readings (all keys, don't press any key)"))
+        self.btn_cal_rest = QPushButton(tr("AnalogTab", "Initial calibration"))
+        self.lbl_rest_note = QLabel(tr("AnalogTab", "Do not press any key when calibrating"))
+        self.lbl_rest_note.setStyleSheet("color: gray;")
+        self.lbl_rest_note.setWordWrap(True)
         self.chk_cal_full = QPushButton(tr("AnalogTab", "Bottom-out calibration"))
         self.chk_cal_full.setCheckable(True)  # 开关：开启期间全部键等效 KC_NO
-        self.chk_full_note = QLabel(tr("AnalogTab", "On: all keys are disabled. Press every key fully, then switch off to sample"))
+        self.chk_full_note = QLabel(tr("AnalogTab", "After enabling, press every key in turn, hold for a few seconds, release, then switch off to finish calibration"))
         self.chk_full_note.setStyleSheet("color: gray;")
         self.chk_full_note.setWordWrap(True)
-        self.btn_reset_all = QPushButton(tr("AnalogTab", "Reset all keys to defaults"))
+        # v3 固件：0xF2 只改 RAM，点此钮才发 0xF6 把 RAM 全量落盘 EEPROM
+        self.btn_save = QPushButton(tr("AnalogTab", "Save (all)"))
+        self.btn_reset_all = QPushButton(tr("AnalogTab", "Restore defaults (all)"))
         self.btn_cal_rest.clicked.connect(lambda: self.do_calibrate(ANALOG_CAL_SAMPLE_REST))
         self.chk_cal_full.toggled.connect(self.on_cal_full_toggled)
         self.btn_reset_all.clicked.connect(self.do_reset_all)
+        self.btn_save.clicked.connect(self.do_save)
         btn_col.addWidget(self.btn_cal_rest)
+        btn_col.addWidget(self.lbl_rest_note)
         btn_col.addWidget(self.chk_cal_full)
         btn_col.addWidget(self.chk_full_note)
+        btn_col.addWidget(self.btn_save)
         btn_col.addWidget(self.btn_reset_all)
         btn_col.addStretch(1)
+        self._update_save_state()
         main_row.addLayout(btn_col)
         main_row.addStretch(1)  # 与左端等量 → 整体居中
 
         dv.addLayout(main_row)
 
         # 底：原始读数一行（原始 ADC / 初始 / 触底）+ 操作结果状态行
-        self.lbl_raw = QLabel("")
+        # 选中键的键码显示在左侧预览键帽上，不再单独占一行
+        self.lbl_raw = _retain_space(QLabel(""))
         dv.addWidget(self.lbl_raw)
         self.lbl_status = QLabel("")
         self.lbl_status.setWordWrap(True)
@@ -471,10 +667,8 @@ class AnalogTab(BasicEditor):
         self.addWidget(panel, 1)
 
     def _clear_selection_ui(self):
-        # 清除选中键上的文字
-        if self._selected_widget is not None:
-            self._selected_widget.text = ""
-            self._selected_widget = None
+        # 键面始终显示配置参数(_update_all_keys_text)，取消选中不再清文字；键码改在底部栏显示
+        self._selected_widget = None
         self.container.update()
         if self.device is not None and self.caps is not None:
             self._show_global_mode()
@@ -501,6 +695,8 @@ class AnalogTab(BasicEditor):
         self.device = device
         self._timer.stop()
         self._flush_timer.stop()
+        self.unlock_lbl.hide()
+        self.unlock_btn.hide()
         self.caps = None
         self.selected = None
         self.configs = {}
@@ -508,6 +704,11 @@ class AnalogTab(BasicEditor):
         self._selected_widget = None
         self._all_configs_loaded = False
         self._global_cfg = None
+        # 设备变更：上一设备未下发的编辑/未保存标记全部作废（RAM 状态已不可知）
+        self._pending_config = None
+        self._dirty = False
+        self._save_supported = False
+        self._update_save_state()
         self._clear_selection_ui()
         if device is None or device.keyboard is None:
             self.container.setEnabled(False)
@@ -527,6 +728,10 @@ class AnalogTab(BasicEditor):
             return
         self.caps = caps
         self.num_keys = caps["num_keys"]
+        # v3+ 才有"保存到 EEPROM"按钮（0xF2 仅 RAM + 0xF6 显式落盘）；
+        # v2 固件维持"每次 0xF2 防抖落盘"的旧语义，按钮禁用并提示自动保存
+        self._save_supported = caps["version"] >= 3
+        self._update_save_state()
         # 触底校准开关按固件当前运行态初始化：GUI 重启后能对上，不会误以为已关闭
         self._untoggle(self.chk_cal_full, bool(caps.get("bottom_out", 0)))
         self.rows = device.keyboard.rows
@@ -538,22 +743,45 @@ class AnalogTab(BasicEditor):
         self._build_ki_widget_map()
         self.container.setEnabled(True)
         self._show_global_mode()
-
-    def activate(self):
-        if self.caps is not None and self.selected is not None:
+        # 设备在行程页激活期间发生变更(热插拔/刷新)：rebuild 顶部停了 timer，
+        # 这里按激活态恢复，否则要切走再切回标签高亮才恢复
+        if self._active:
             self._timer.start()
 
+    def activate(self):
+        self._active = True
+        # 计时器只要本标签激活且固件支持 analog 就跑：矩阵按下高亮与是否选键无关
+        if self.caps is not None:
+            self._timer.start()
+            if self.selected is not None:
+                self._render_selected_keycode()
+
     def deactivate(self):
+        self._active = False
         self._timer.stop()
-        self._flush_timer.stop()
+        # 离开页面前把未下发编辑同步落进 RAM（仍不发 0xF6，落盘由用户点"保存"）
+        self._flush_pending()
 
     # ------------------------------------------------------ global mode ----
+    def _show_key_detail(self, visible):
+        """按键专属内容的显示开关（两种模式下面板布局完全一致）。
+
+        - 行程区：控件本体**始终保留** —— 全局模式下它仍要提供触发/断开设置轨，
+          只隐去"行程进度条 + 行程 N 读数"两列（图1 指的正是这两列，不含设置轨）；
+        - 读数行（图2）与"该键跟随全局值"复选框（图3）：全局模式整体隐藏，
+          两者都设了 retainSizeWhenHidden，隐藏只留白、不挤动布局。
+        """
+        self.track.set_travel_cols_visible(visible)
+        for w in (self.lbl_raw, self.chk_follow):
+            w.setVisible(visible)
+
     def _show_global_mode(self):
         """未选键时进入全局参数模式：手柄显示固件全局槽的值，
         行程与三个读数显示无意义占位（全局槽不含锚点、无"当前行程"概念）。"""
         self.selected = None
         self.lbl_key.setText(tr("AnalogTab", "Global parameters"))
         self._detail_panel.show()
+        self._show_key_detail(False)
         self._load_all_configs()
         cfg = self._get_global_config()
         self._load_config_to_ui(cfg)
@@ -614,6 +842,9 @@ class AnalogTab(BasicEditor):
 
     # -------------------------------------------------------------- events
     def on_key_clicked(self):
+        # 切键前先把防抖窗内的编辑落进"旧选中键"的槽：flush 按 self.selected 写，
+        # 必须赶在 selected 改写前执行，否则 A 键的编辑会写进 B 键（150ms 竞态）。
+        self._flush_pending()
         widget = self.container.active_key
         if widget is None or widget.desc.row is None or widget.desc.col is None:
             return
@@ -630,14 +861,17 @@ class AnalogTab(BasicEditor):
             except Exception:
                 return
         self._load_config_to_ui(cfg)
+        self._show_key_detail(True)
         self._detail_panel.show()
         self.container.update()
         self._timer.start()
 
     def on_key_deselected(self):
+        # 同 on_key_clicked：先落旧键，再清 selected（原来的 _flush_timer.stop()
+        # 直接丢弃编辑，等于静默吞掉用户最后一次拖动）
+        self._flush_pending()
         self.selected = None
-        self._timer.stop()
-        self._flush_timer.stop()
+        # 不停 _timer：矩阵按下高亮与选键无关，只要本标签激活就持续刷新
         self._clear_selection_ui()
 
     def on_layout_changed(self):
@@ -673,6 +907,7 @@ class AnalogTab(BasicEditor):
         if self.selected is not None:
             self._set_readings(None, cfg.raw_rest, cfg.raw_full)
         self._update_all_keys_text()
+        self._render_selected_keycode()
 
     def _set_readings(self, raw, rest, full):
         """底部读数一行；None 显示为无意义占位。"""
@@ -748,12 +983,62 @@ class AnalogTab(BasicEditor):
             except Exception:
                 pass
         self._pending_config = None
+        # v3：0xF2 只写 RAM——标记"有未保存改动"，由"保存到 EEPROM"按钮提交。
+        # (v2 固件这一步实际已自动落盘，但 _save_supported=False，标记不外显)
+        self._dirty = True
+        self._update_save_state()
+
+    def _flush_pending(self):
+        """把 150ms 防抖窗内未下发的编辑立即同步写进"当前 selected"的 RAM 槽。"""
+        if self._pending_config is not None:
+            self._flush_timer.stop()
+            self.flush_config()
+
+    def _update_save_state(self):
+        """保存按钮三态：可点(有未保存改动) / 已保存(置灰) / 固件不支持(置灰+说明)。"""
+        if self.device is None:
+            self.btn_save.setEnabled(False)
+            self.btn_save.setToolTip(tr("AnalogTab", "Not connected"))
+            return
+        if not self._save_supported:
+            self.btn_save.setEnabled(False)
+            self.btn_save.setToolTip(tr("AnalogTab", "This firmware saves changes automatically"))
+            return
+        self.btn_save.setEnabled(self._dirty)
+        self.btn_save.setToolTip(
+            tr("AnalogTab", "Write current values to keyboard EEPROM") if self._dirty
+            else tr("AnalogTab", "All values are saved"))
+
+    def do_save(self):
+        """点"保存到 EEPROM"：把 RAM 中全部模拟参数一次性提交(0xF6)。
+
+        v3 固件下 0xF2 只改 RAM，拖动期间零 flash 写入；这里先同步补发防抖窗内
+        的最后一次编辑，再发 0xF6 全量落盘——整轮调节只产生一次 EEPROM 提交。
+        校准(0xF4)/恢复默认(0xF5)不走本按钮：它们在固件侧本就即时落盘。
+        """
+        if self.device is None or not self._save_supported:
+            return
+        self._flush_pending()
+        try:
+            ok = self.device.keyboard.analog_persist_commit()
+        except Exception as e:
+            self._flash_status(tr("AnalogTab", "Save failed: {}").format(e))
+            return
+        if not ok:
+            self._flash_status(tr("AnalogTab", "Save failed"))
+            return
+        self._dirty = False
+        self._update_save_state()
+        self._flash_status(tr("AnalogTab", "Saved to EEPROM"))
 
     # --------------------------------------------------------------- polling
     def poll(self):
-        if self.device is None or self.caps is None or self.selected is None:
+        if self.device is None or self.caps is None:
             return
-        if self.selected >= self.num_keys:
+        # ① 矩阵按下高亮：与是否选键无关，每轮都刷
+        self._poll_matrix()
+        # ② 选中键的实时行程读数（analog 命令不受 unlock 门控，照常轮询）
+        if self.selected is None or self.selected >= self.num_keys:
             return
         try:
             readings = self.device.keyboard.analog_get_key_readings(self.selected)
@@ -766,6 +1051,90 @@ class AnalogTab(BasicEditor):
             rest = cfg.raw_rest if cfg is not None else None
             full = cfg.raw_full if cfg is not None else None
             self._set_readings(raw, rest, full)
+
+    def _poll_matrix(self):
+        """轮询整张矩阵按下态：正在按的键渲染成蓝(主题 Highlight)，松开即回普通色。
+
+        刻意不调 setOn()：矩阵测试里"按下过"的深蓝 latch 色就是 on 态
+        (Highlight.darker(150))，用户要求按下过=未按下的普通色，故只用 pressed。
+
+        通用解锁逻辑：secure 固件下 matrix_poll 受 unlock 门控(via.c:266)，先查
+        get_unlock_status，未解锁则显示 Unlock 按钮并清高亮；本固件 VIAL_INSECURE=yes
+        时 get_unlock_status 恒 1，解锁 UI 永不出现、matrix_poll 直接可用。
+        """
+        if self.keyboard is None:
+            return
+        try:
+            unlocked = self.keyboard.get_unlock_status(3)
+        except (RuntimeError, ValueError):
+            return
+        if not unlocked:
+            self._reset_press()
+            self.unlock_lbl.show()
+            self.unlock_btn.show()
+            return
+        self.unlock_lbl.hide()
+        self.unlock_btn.hide()
+
+        try:
+            data = self.keyboard.matrix_poll()
+        except (RuntimeError, ValueError):
+            return
+        if not data or len(data) < 2:
+            return
+        row_size = (self.cols + 7) // 8
+        changed = False
+        for w in self.container.widgets:
+            d = w.desc
+            if getattr(d, "row", None) is None or getattr(d, "col", None) is None:
+                continue
+            # data[0:2] 为 VIAL 头；每行 row_size 字节，列 bit 从行尾字节往低字节排(同 matrix_test)
+            idx = 2 + d.row * row_size + (row_size - 1 - d.col // 8)
+            pressed = bool((data[idx] >> (d.col % 8)) & 1) if 0 <= idx < len(data) else False
+            if w.pressed != pressed:
+                w.setPressed(pressed)
+                changed = True
+        if changed:
+            self.container.update()
+        # 预览键帽跟随选中键的按下态（按下同样变蓝）
+        if self.selected is not None:
+            sel = self._ki_widgets.get(self.selected)
+            self.keycap.set_pressed(bool(sel is not None and sel.pressed))
+
+    def _reset_press(self):
+        """清掉所有键的按下高亮（锁定时调用，避免残留蓝色）。"""
+        changed = False
+        for w in self.container.widgets:
+            if w.pressed:
+                w.setPressed(False)
+                changed = True
+        if changed:
+            self.container.update()
+        self.keycap.set_pressed(False)
+
+    def _render_selected_keycode(self):
+        """把选中键的 0 层键码显示在面板最左的预览键帽上。
+
+        键盘区键面始终由 _update_all_keys_text 显示配置参数，键码不占用键面；
+        未选中(全局模式)则隐藏预览键帽。
+        """
+        if self.selected is None or self.keyboard is None:
+            self.keycap.set_key(None)
+            return
+        row = self.selected // self.cols
+        col = self.selected % self.cols
+        code = self.keyboard.layout.get((0, row, col))
+        label = KeycodeDisplay.get_label(code) if code is not None else "—"
+        # 保留标签自带的换行（如 "Locking\nCaps"）：与"键位映射"页键面渲染一致
+        self.keycap.set_key(label)
+        # 选中瞬间即同步该键当前按下态，避免残留蓝色
+        w = self._ki_widgets.get(self.selected)
+        self.keycap.set_pressed(bool(w is not None and w.pressed))
+
+    def unlock(self):
+        """点击 Unlock 按钮：弹 vial 解锁对话框(已解锁则直接返回)。"""
+        if self.keyboard is not None:
+            Unlocker.unlock(self.keyboard)
 
     # ------------------------------------------------------------ calibrate
     def _reload_all_configs(self):
@@ -863,6 +1232,9 @@ class AnalogTab(BasicEditor):
             return
         # 使缓存失效，重新从固件加载
         self._reload_all_configs()
+        # 出厂重置在固件侧即时落盘：RAM 与 EEPROM 已一致，不存在待保存改动
+        self._dirty = False
+        self._update_save_state()
         if self.selected is None:
             self._show_global_mode()
         else:

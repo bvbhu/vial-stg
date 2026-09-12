@@ -55,12 +55,15 @@ DYNAMIC_VIAL_ALT_REPEAT_KEY_SET = 0x08
 # 固件侧见 vial-qmk-wireless/docs/vial-analog-protocol.md
 # v2：子命令从 0x0E-0x13 迁移到 0xF0-0xF5 高位段，
 #     远离基础 Vial 子命令(0x00-0x0D 起)的上游低位增长区，规避冲突。
+# v3：0xF2 调参改为仅改 RAM(不落盘)，新增 0xF6 把 RAM 全量提交到 EEPROM——
+#     拖动滑块只动 RAM、不磨损 Flash，点 GUI "保存"才写 EEPROM。
 CMD_VIAL_ANALOG_GET_CAPS         = 0xF0
 CMD_VIAL_ANALOG_GET_KEY_CONFIG   = 0xF1
 CMD_VIAL_ANALOG_SET_KEY_CONFIG   = 0xF2
 CMD_VIAL_ANALOG_GET_KEY_READINGS = 0xF3
 CMD_VIAL_ANALOG_CALIBRATE        = 0xF4
 CMD_VIAL_ANALOG_RESET_KEY        = 0xF5
+CMD_VIAL_ANALOG_PERSIST_COMMIT   = 0xF6  # v3：显式保存，把 RAM 全量落盘 EEPROM(GUI "保存"按钮)
 
 ANALOG_AXIS_NONE = 0
 ANALOG_AXIS_HALL = 1
@@ -85,7 +88,8 @@ ANALOG_CAL_AUTO_PEAK        = 3
 ANALOG_CAL_BOTTOM_OUT_ON    = 4  # 触底校准模式开：全部键等效 KC_NO，逐个按满即采集
 ANALOG_CAL_BOTTOM_OUT_OFF   = 5  # 触底校准模式关
 
-ANALOG_PROTOCOL_VERSION = 2  # 与固件 VIAL_ANALOG_PROTOCOL_VERSION 对应；v2=ID 迁移到 0xF0-0xF5
+ANALOG_PROTOCOL_VERSION = 3  # 与固件 VIAL_ANALOG_PROTOCOL_VERSION 对应
+# v2=ID 迁移到 0xF0-0xF5；v3=0xF2 改为仅改 RAM(suppress 落盘)+新增 0xF6 显式保存
 
 # how much of a macro/keymap buffer we can read/write per packet
 BUFFER_FETCH_CHUNK = 28

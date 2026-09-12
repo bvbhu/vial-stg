@@ -231,7 +231,7 @@ _RAW = {
     "Restore current layout after flashing": "刷写固件后恢复当前配置",
     "Reset all settings to default values?": "确定要把所有设置恢复为默认值吗？",
     "Unlock the keyboard before testing:": "测试前请先解锁键盘：",   # [老]
-    "Layer": "图层",
+    "Layer": "层",
     "Saved keymap belongs to a different keyboard, are you sure you want to continue?":
         "保存的键位配置属于另一把键盘，确定要继续吗？",
 
@@ -253,12 +253,13 @@ _RAW = {
     ("AnalogTab", "Travel"): "行程",
     ("AnalogTab", "Raw ADC: {}  Rest: {}  Bottom: {}"): "原始ADC读数：{}  初始读数：{}  触底读数：{}",
     ("AnalogTab", "This key follows global values"): "该键跟随全局值",
-    ("AnalogTab", "Recalibrate rest readings (all keys, don't press any key)"):
-        "重新校准全部初始读数（不要按下按键）",
+    ("AnalogTab", "Initial calibration"): "初始校准",
+    ("AnalogTab", "Do not press any key when calibrating"): "点击校准时不要按下任何按键",
     ("AnalogTab", "Bottom-out calibration"): "触底校准",
-    ("AnalogTab", "On: all keys are disabled. Press every key fully, then switch off to sample"):
-        "开启期间全部按键失效；逐个按满所有按键，再关闭开关完成采样",
-    ("AnalogTab", "Reset all keys to defaults"): "所有键恢复默认值",
+    ("AnalogTab", "After enabling, press every key in turn, hold for a few seconds, release, then switch off to finish calibration"):
+        "开启后依次按下所有按键，保持几秒，然后松开，最后关闭完成校准",
+    ("AnalogTab", "Save (all)"): "保存（全部）",
+    ("AnalogTab", "Restore defaults (all)"): "恢复默认值（全部）",
     ("AnalogTab", "Rest readings sampled"): "已采样初始读数",
     ("AnalogTab", "Bottom readings sampled"): "已采样触底读数",
     ("AnalogTab", "Press every key fully, then switch off"): "请逐个按满所有按键，然后关闭开关",
@@ -269,6 +270,13 @@ _RAW = {
     ("AnalogTab", "Release point"): "断开点",
     ("AnalogTab", "RT down sensitivity"): "RT 触发灵敏度",
     ("AnalogTab", "RT up sensitivity"): "RT 断开灵敏度",
+    ("AnalogTab", "Unlock the keyboard to show key presses:"): "解锁键盘以显示按键按下：",
+    ("AnalogTab", "Write current values to keyboard EEPROM"): "将当前参数写入键盘 EEPROM",
+    ("AnalogTab", "All values are saved"): "所有改动均已保存",
+    ("AnalogTab", "This firmware saves changes automatically"): "该固件版本会自动保存改动",
+    ("AnalogTab", "Saved to EEPROM"): "已保存到 EEPROM",
+    ("AnalogTab", "Save failed"): "保存失败",
+    ("AnalogTab", "Save failed: {}"): "保存失败：{}",
 }
 
 
