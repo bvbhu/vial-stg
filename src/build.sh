@@ -87,6 +87,10 @@ emcc \
     -llzma \
     ../main.c
 cp ../index.html .
+# coi-serviceworker 必须和 index.html 同级部署：index.html 用相对路径引用它，
+# 并由它自身的 URL 决定 SW 的 scope。缺了这个文件，pthread 版在 GitHub Pages
+# 上会直接 "SharedArrayBuffer is not defined"。
+cp ../coi-serviceworker.min.js .
 cat ../worker.js >> main-${UNIQVER}.worker.js
 sed -i 's+err("worker sent an unknown command+my_onmessage(e);return;err("worker sent an unknown command/+g' main-${UNIQVER}.js
 

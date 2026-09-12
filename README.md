@@ -27,6 +27,7 @@ CI 里出现的 `target/Vial-STG`、`Vial-STGSetup.exe`、`Vial-STG-v<版本>-*`
 | `vial-gui/**`                                                           | GPL-2.0-or-later（以 per-file SPDX 头为准，全文见`vial-gui/COPYING`） |
 | `src/`、`patches/`、`fetch-*.sh`、`build-deps.sh`、`version.sh` | 来自`vial-kb/vial-web`，**上游未声明许可证**                    |
 | `src/simpleeval.py`                                                     | MIT，第三方 vendored（`Copyright (C) 2013-2019 Daniel Fairhead`）     |
+| `src/coi-serviceworker.min.js`                                          | MIT，第三方 vendored（Guido Zuidhof and contributors，v0.1.7）        |
 
 本仓库按 GPL-2.0-or-later 发布（PyQt5 是 GPL-3.0，整条链路只能是 GPL 系），
 全文见 `LICENSE`。
@@ -51,6 +52,27 @@ git clone https://github.com/vial-kb/via-keymap-precompiled.git
 ./build-deps.sh
 cd src && ./build.sh
 ```
+
+#### Web 版必须跑在跨域隔离的环境里
+
+`src/build.sh` 用 `-pthread` + `-sPROXY_TO_PTHREAD` 链接，emscripten 的 pthread 建在
+`SharedArrayBuffer` 上；而 SAB 只在**跨域隔离**（cross-origin isolated）的文档里存在，
+需要服务器发出这两个响应头：
+
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+缺头的话页面一加载就 `Uncaught ReferenceError: SharedArrayBuffer is not defined`。
+
+**GitHub Pages 不能发自定义响应头**（[community#13309](https://github.com/orgs/community/discussions/13309)
+多年未实现），所以 `web-pages.yml` 部署到 Pages 时靠
+[`src/coi-serviceworker.min.js`](src/coi-serviceworker.min.js) 在客户端注入这两个头。
+配套地，`index.html` 不再无条件加载 `main-*.js`，而是等隔离就绪再加载
+（SW 接管后会自动刷新一次）——否则首次访问仍会在 SW 生效前撞上同一个崩溃。
+
+换到能发头的主机（Cloudflare Pages / Netlify 放个 `_headers` 文件）就可以把这套去掉。
 
 ### 桌面版
 

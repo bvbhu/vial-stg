@@ -1,6 +1,14 @@
 <head>
     <title>Vial-STG Web</title>
     <link rel="icon" href="icon.png" type="image/png">
+    <!-- emscripten 的 -pthread / -sPROXY_TO_PTHREAD 依赖 SharedArrayBuffer，而 SAB 只在
+         「跨域隔离」的文档里存在，需要响应头 COOP: same-origin + COEP: require-corp。
+         GitHub Pages 不支持自定义响应头（github.com/orgs/community/discussions/13309），
+         所以用 service worker 在客户端注入这两个头。
+         注意：必须用 src 引用而不是内联 —— 脚本靠 document.currentScript.src
+         把自己注册成 SW；相对路径让 SW 的 scope 落在部署目录（/vial-stg/），
+         项目页和根站部署都能用。 -->
+    <script src="coi-serviceworker.min.js"></script>
 <style>
 body {
     font-family: sans-serif;
@@ -265,6 +273,53 @@ body {
     };
 </script>
 
-<script src="main-@UNIQVER@.js"></script>
+<script>
+    // main-*.js 一加载就会引用 SharedArrayBuffer。SW 接管之前文档还没跨域隔离，
+    // 这时候加载必然抛 "Uncaught ReferenceError: SharedArrayBuffer is not defined"
+    // （就是之前那个弹窗）。coi-serviceworker 会在 SW 接管后自动刷新一次，
+    // 所以这里等隔离就绪再加载，而不是无条件同步加载。
+    (function () {
+        var btn = document.getElementById("startup_btn");
+
+        function isolated() {
+            // 直接测真正需要的东西，比只看 flag 更宽容（老浏览器/不同实现）
+            return window.crossOriginIsolated === true ||
+                   typeof SharedArrayBuffer !== "undefined";
+        }
+
+        var loaded = false;
+        function loadApp() {
+            if (loaded) return;     // 重复加载 wasm 会把运行时初始化两遍，必须幂等
+            loaded = true;
+            var s = document.createElement("script");
+            s.src = "main-@UNIQVER@.js";
+            s.async = false;    // 动态插入的脚本默认 async，这里保持与原来解析期加载一致的时机
+            document.body.appendChild(s);
+        }
+
+        if (isolated()) {
+            loadApp();
+            return;
+        }
+
+        // 等 SW 注册完自己刷新。超时说明这条路走不通：隐私模式、禁用 SW、
+        // 或者不是 https/file:// 之类的不安全上下文。
+        btn.disabled = true;
+        btn.value = "Setting up isolation...";
+        var ticks = 0;
+        var timer = setInterval(function () {
+            if (isolated()) {
+                clearInterval(timer);
+                loadApp();
+            } else if (++ticks > 40) {    // 20 秒
+                clearInterval(timer);
+                show_error("This page could not become cross-origin isolated, so the " +
+                           "threads it needs are unavailable.<br>The required service worker " +
+                           "may be blocked (private mode?) — try a normal window, or use the " +
+                           "desktop Vial-STG app instead.");
+            }
+        }, 500);
+    })();
+</script>
 
 </body>
