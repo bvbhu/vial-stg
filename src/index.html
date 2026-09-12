@@ -106,14 +106,34 @@ body {
     Module.canvas = document.getElementById("canvas");
     Module.qtCanvasElements = [Module.canvas];
 
+    // 这几个跨回调共享的状态必须显式声明成全局：以前 g_device / g_read_timeout /
+    // g_animation 都是"用到才赋值"的隐式全局，只要设备在第一次写入之前就上报一次
+    // （上一个会话残留在 IN 端点里的报文，open() 时会被浏览器立刻投递），
+    // oninputreport 里读 g_read_timeout 就会抛 "Uncaught ReferenceError:
+    // g_read_timeout is not defined" —— 就是那个连接即弹窗的报错。
+    var g_device = null;
+    var g_read_timeout = null;
+    var g_read_pending = false;   // 是否正等这一次写入的应答
+    var g_animation = null;
+    var g_animation_counter = 0;
+
     function read_timeout() {
         console.log("device read timed out!");
+        g_read_timeout = null;
+        g_read_pending = false;
         _vialglue_set_response_error();
     }
 
     function my_onmessage(e) {
         if (e.data.cmd == "write_device") {
             g_device.sendReport(0, new Uint8Array(e.data.data));
+            // 只有"刚写完这一笔请求"的窗口期内，设备上报才是这一笔的应答。
+            // 其余上报（残留报文、上一笔的迟到报文）必须丢弃：它们会顶替掉真正的应答，
+            // 让后面每一条命令都错位一格——读键盘定义时就是 LZMAError: Corrupt input data。
+            g_read_pending = true;
+            if (g_read_timeout !== null) {
+                clearTimeout(g_read_timeout);
+            }
             g_read_timeout = setTimeout(read_timeout, 500);
         } else if (e.data.cmd == "unlock_start") {
             var u8 = new Uint8Array(e.data.data);
@@ -220,7 +240,16 @@ body {
         btn.value = "Connecting to the device...";
         await devices[0].open();
         devices[0].oninputreport = function(ev) {
-            clearTimeout(g_read_timeout);
+            if (!g_read_pending) {
+                // 没有待应答的请求 → 这是设备自发上报或残留/迟到的报文，丢掉
+                console.log("dropped an unsolicited device report");
+                return;
+            }
+            g_read_pending = false;
+            if (g_read_timeout !== null) {
+                clearTimeout(g_read_timeout);
+                g_read_timeout = null;
+            }
             var ptr = _malloc(32);
             for (var i = 0; i < 32; ++i) {
                 setValue(ptr + i, ev.data.getUint8(i), "i8");
