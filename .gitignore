@@ -3,3 +3,4 @@ sources
 deps
 src/build
 via-keymap-precompiled
+vial-gui/*.vil

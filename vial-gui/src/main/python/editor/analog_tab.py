@@ -17,16 +17,21 @@
 未选中按键时：全局参数模式——行程与三个读数显示为无意义占位（"—"），
 手柄显示固件 EEPROM 全局槽的值；调节经 0xF2/0xFFFF 写全局槽 RAM，由固件
 analog_set_global 级联刷新所有跟随键（GUI 不逐键补写）。
-(v3 固件)0xF2 只改 RAM 不落盘：点"保存到 EEPROM"(0xF6) 才写入 EEPROM，
+0xF2 只改 RAM 不落盘：点"保存到 EEPROM"(0xF6) 才写入 EEPROM，
 一轮调节压成一次 flash 提交；校准(0xF4)/恢复默认(0xF5)仍即时落盘。
 
-协议见 protocol/analog.py 与 vial-qmk-wireless/docs/vial-analog-protocol.md。
+行程域满量程(最大键程)由固件 ANALOG_MAX_TRAVEL 决定，经 0xF0 caps 上报：
+GUI 不假设它是 255，所有行程量纲的控件(标尺、手柄、RT 滑块)按上报值定量程，
+线格式宽度(12/16 字节)也由该值决定。
+
+协议见 protocol/analog.py 与 vial-qmk-stg/docs/vial-analog-protocol.md。
 """
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEvent, QRect, QRectF
 from PyQt5.QtGui import QFont, QFontMetrics, QPainter, QPalette, QColor
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QStyle,
-                             QStyleOptionSlider, QCheckBox, QPushButton, QSizePolicy, QApplication)
+                             QStyleOptionSlider, QCheckBox, QPushButton, QSizePolicy, QApplication,
+                             QButtonGroup)
 
 from editor.basic_editor import BasicEditor
 from util import tr, KeycodeDisplay
@@ -37,7 +42,7 @@ from protocol.constants import (ANALOG_AXIS_NONE, ANALOG_FLAG_RT_ENABLED,
                                 ANALOG_CAL_BOTTOM_OUT_ON, ANALOG_CAL_BOTTOM_OUT_OFF,
                                 ANALOG_CAP_BOTTOM_OUT_CAL,
                                 ANALOG_PROTOCOL_VERSION)
-from protocol.analog import AnalogKeyConfig
+from protocol.analog import AnalogKeyConfig, ANALOG_DEFAULT_MAX_TRAVEL
 from unlocker import Unlocker
 from constants import (KEY_SIZE_RATIO, KEY_SPACING_RATIO, KEY_ROUNDNESS,
                        SHADOW_TOP_PADDING, SHADOW_BOTTOM_PADDING)
@@ -58,8 +63,8 @@ def _retain_space(widget):
 class TravelProgressBar(QWidget):
     """行程区（参照用户参考图，从左到右四列）：
 
-    1. 纵向进度条：比背景更暗的凹槽 + 高亮填充，填充高度 = 当前行程（0 在上、255 在下）
-    2. 刻度列：顶部 0、其下"行程 N"实时读数、底部 255
+    1. 纵向进度条：比背景更暗的凹槽 + 高亮填充，填充高度 = 当前行程（0 在上、满量程在下）
+    2. 刻度列：顶部 0、其下"行程 N"实时读数、底部满量程
     3. 竖线轨道分三段：断开点以上 / 两点之间(死区) / 触发点以下。
        轨道三段与两个手柄全部交给 QStyle 绘制（样式凹槽 + 样式填充 + 样式手柄），
        配色、渐变、暗边与 RT 滑块逐像素同源（拖动发 changed()）
@@ -84,6 +89,10 @@ class TravelProgressBar(QWidget):
         self.actuation = 200
         self.release = 192
         self.travel = None  # None = 全局模式，行程读数显示占位
+        # 行程域满量程（固件 ANALOG_MAX_TRAVEL，经 0xF0 caps 上报）。
+        # 本控件所有"值 ↔ 像素"换算与上限都取它，而不是写死 255：
+        # 满量程大于 255 时行程/阈值是 uint16，刻度与手柄位置必须同比缩放。
+        self.max_travel = ANALOG_DEFAULT_MAX_TRAVEL
         # 列1/列2（行程进度条 + 行程读数）是否绘制：全局模式下这两列无意义，
         # 但列3/列4 的触发/断开设置轨与手柄必须保留。只影响绘制，不改尺寸/布局。
         self._travel_cols = True
@@ -100,10 +109,26 @@ class TravelProgressBar(QWidget):
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
 
     # ------------------------------------------------------------ 值接口 ----
+    def set_max_travel(self, max_travel):
+        """设定行程域满量程（连接固件后由 caps 传入）。
+
+        满量程变小（如换了一台窄域的键盘）时，手上的旧阈值会越界：一律收进新域，
+        否则手柄/滑块会落在刻度区外、而写回固件的值也是越界的。
+        """
+        max_travel = max(1, int(max_travel))
+        if max_travel == self.max_travel:
+            return
+        self.max_travel = max_travel
+        self.actuation = max(0, min(max_travel, self.actuation))
+        self.release = max(0, min(max_travel, self.release))
+        if self.travel is not None:
+            self.travel = max(0, min(max_travel, self.travel))
+        self.update()
+
     def set_points(self, actuation, release, travel=None):
         """程序化装载：不发 changed。"""
-        self.actuation = max(0, min(255, int(actuation)))
-        self.release = max(0, min(255, int(release)))
+        self.actuation = max(0, min(self.max_travel, int(actuation)))
+        self.release = max(0, min(self.max_travel, int(release)))
         self.travel = travel
         self.update()
 
@@ -127,14 +152,14 @@ class TravelProgressBar(QWidget):
     def _y_of(self, v):
         top = self._MARGIN
         bot = self.height() - self._MARGIN
-        return top + (bot - top) * v / 255.0
+        return top + (bot - top) * v / float(self.max_travel)
 
     def _v_of(self, y):
         top = self._MARGIN
         bot = self.height() - self._MARGIN
         if bot <= top:
             return 0
-        return max(0, min(255, round((y - top) * 255.0 / (bot - top))))
+        return max(0, min(self.max_travel, round((y - top) * self.max_travel / float(bot - top))))
 
     def _label_ys(self):
         """两个标注的中心 y：默认贴各自手柄；手柄间距不足一个标注块时，
@@ -273,10 +298,11 @@ class TravelProgressBar(QWidget):
         # 但列3/列4 的触发/断开设置轨与手柄必须保留——那正是全局参数本身。
         # 只跳过绘制、不改尺寸，所以隐藏这两列不会影响布局。
         if self._travel_cols:
-            # 列2 刻度：顶 0、其下"行程 N"实时读数、底 255
+            # 列2 刻度：顶 0、其下"行程 N"实时读数、底 满量程(固件 ANALOG_MAX_TRAVEL)
             qp.setPen(text_color)
             qp.drawText(QRect(self._SCALE_X, top - 2, 54, 16), Qt.AlignLeft | Qt.AlignVCenter, "0")
-            qp.drawText(QRect(self._SCALE_X, bot - 14, 54, 16), Qt.AlignLeft | Qt.AlignVCenter, "255")
+            qp.drawText(QRect(self._SCALE_X, bot - 14, 54, 16), Qt.AlignLeft | Qt.AlignVCenter,
+                        str(self.max_travel))
             qp.drawText(QRect(self._SCALE_X, top + 20, 54, 16), Qt.AlignLeft | Qt.AlignVCenter,
                         tr("AnalogTab", "Travel"))
             qp.drawText(QRect(self._SCALE_X, top + 38, 54, 20), Qt.AlignLeft | Qt.AlignTop,
@@ -543,6 +569,10 @@ class AnalogTab(BasicEditor):
         self.caps = None
         self.num_keys = 0
         self.rows = self.cols = 0
+        # 行程域满量程（固件 ANALOG_MAX_TRAVEL）。握手前按默认 255，
+        # 读到 caps 后由 _apply_max_travel 铺到行程轨道与 RT 滑块上。
+        self.max_travel = ANALOG_DEFAULT_MAX_TRAVEL
+        self.rt_end_labels = {}  # RT 滑块末端刻度标签，随满量程改字
         self.configs = {}
         self.selected = None
         self.keyboard = None
@@ -552,9 +582,10 @@ class AnalogTab(BasicEditor):
         self._global_cfg = None  # 全局默认配置缓存（固件 0xFFFF 槽）
         self._loading_ui = False  # 程序化装载 UI 期间抑制 on_slider_changed
         self._active = False      # 本标签当前是否激活(显示中)，决定 rebuild 后是否重启轮询
-        # v3 协议保存语义：_dirty=RAM 有改动未落盘；_save_supported=固件支持 0xF6
+        # 保存语义：_dirty=RAM 有改动未落盘；_save_supported=固件支持 0xF6 显式落盘
         self._dirty = False
         self._save_supported = False
+        self._display_mode = "act_rel"  # "act_rel"=触发/断开，"rt"=RT 灵敏度
 
         self._timer = QTimer()
         self._timer.setInterval(20)
@@ -578,6 +609,25 @@ class AnalogTab(BasicEditor):
 
         kbd_area = ClickableWidget()
         kbd_layout = QVBoxLayout(kbd_area)
+        # 键面显示模式切换
+        disp_row = QHBoxLayout()
+        disp_row.addWidget(QLabel(tr("AnalogTab", "Key display:")))
+        self.btn_disp_act_rel = QPushButton(tr("AnalogTab", "Act/Rel"))
+        self.btn_disp_act_rel.setCheckable(True)
+        self.btn_disp_act_rel.setChecked(True)
+        self.btn_disp_rt = QPushButton(tr("AnalogTab", "RT"))
+        self.btn_disp_rt.setCheckable(True)
+        self._disp_group = QButtonGroup(self)
+        self._disp_group.setExclusive(True)
+        self._disp_group.addButton(self.btn_disp_act_rel)
+        self._disp_group.addButton(self.btn_disp_rt)
+        self.btn_disp_act_rel.toggled.connect(lambda c: c and self._set_display_mode("act_rel"))
+        self.btn_disp_rt.toggled.connect(lambda c: c and self._set_display_mode("rt"))
+        for b in (self.btn_disp_act_rel, self.btn_disp_rt):
+            b.setEnabled(False)
+            disp_row.addWidget(b)
+        disp_row.addStretch()
+        kbd_layout.addLayout(disp_row)
         kbd_layout.addWidget(self.container)
         kbd_layout.setAlignment(self.container, Qt.AlignHCenter)
         kbd_area.clicked.connect(self.on_empty_space_clicked)
@@ -652,9 +702,11 @@ class AnalogTab(BasicEditor):
             ends = QHBoxLayout()
             ends.addWidget(QLabel("0"))
             ends.addStretch(1)
-            ends.addWidget(QLabel("255"))
+            end_lbl = QLabel("255")
+            ends.addWidget(end_lbl)
             mid_col.addLayout(ends)
             self.rt_sliders[name] = s
+            self.rt_end_labels[name] = end_lbl
 
         note = QLabel(tr("AnalogTab", "In RT mode, actuation and release points act as the dead zone"))
         note.setStyleSheet("color: gray;")
@@ -682,7 +734,7 @@ class AnalogTab(BasicEditor):
         self.chk_full_note = QLabel(tr("AnalogTab", "After enabling, press every key in turn, hold for a few seconds, release, then switch off to finish calibration"))
         self.chk_full_note.setStyleSheet("color: gray;")
         self.chk_full_note.setWordWrap(True)
-        # v3 固件：0xF2 只改 RAM，点此钮才发 0xF6 把 RAM 全量落盘 EEPROM
+        # 0xF2 只改 RAM，点此钮才发 0xF6 把 RAM 全量落盘 EEPROM
         self.btn_save = QPushButton(tr("AnalogTab", "Save (all)"))
         self.btn_reset_all = QPushButton(tr("AnalogTab", "Restore defaults (all)"))
         self.btn_cal_rest.clicked.connect(lambda: self.do_calibrate(ANALOG_CAL_SAMPLE_REST))
@@ -740,6 +792,19 @@ class AnalogTab(BasicEditor):
         chk.blockSignals(False)
 
     # ------------------------------------------------------------ interface
+    def _apply_max_travel(self, max_travel):
+        """把固件上报的行程域满量程铺给所有以"行程"为单位的控件。
+
+        行程轨道按满量程缩放；RT 距离滑块落在同一行程域上（它调的是两点之差），
+        量程与末端刻度必须跟着走，否则宽域固件下这些控件一半的量程够不着。
+        """
+        self.max_travel = max(1, int(max_travel))
+        self.track.set_max_travel(self.max_travel)
+        for s in self.rt_sliders.values():
+            s.setRange(0, self.max_travel)
+        for lbl in self.rt_end_labels.values():
+            lbl.setText(str(self.max_travel))
+
     def valid(self):
         return self.caps is not None and self.caps["axis_type"] != ANALOG_AXIS_NONE
 
@@ -762,6 +827,8 @@ class AnalogTab(BasicEditor):
         self._save_supported = False
         self._update_save_state()
         self._clear_selection_ui()
+        self.btn_disp_act_rel.setEnabled(False)
+        self.btn_disp_rt.setEnabled(False)
         if device is None or device.keyboard is None:
             self.container.setEnabled(False)
             self._untoggle(self.chk_cal_full, False)
@@ -772,7 +839,8 @@ class AnalogTab(BasicEditor):
             caps = None
         # 不支持 analog 的固件会把请求包原样回显，于是 version 会读成 0xFE/0xFF、
         # num_keys 读成 0x00F0 之类的垃圾值。必须先用版本号挡掉，不能只靠 axis_type。
-        if not caps or not (1 <= caps["version"] <= ANALOG_PROTOCOL_VERSION):
+        # 版本号等值判定：GUI 与固件同步更新，不接受任何其他版本。
+        if not caps or caps["version"] != ANALOG_PROTOCOL_VERSION:
             self.container.setEnabled(False)
             return
         if caps["axis_type"] == ANALOG_AXIS_NONE or caps["num_keys"] == 0:
@@ -780,9 +848,10 @@ class AnalogTab(BasicEditor):
             return
         self.caps = caps
         self.num_keys = caps["num_keys"]
-        # v3+ 才有"保存到 EEPROM"按钮（0xF2 仅 RAM + 0xF6 显式落盘）；
-        # v2 固件维持"每次 0xF2 防抖落盘"的旧语义，按钮禁用并提示自动保存
-        self._save_supported = caps["version"] >= 3
+        # 行程域宽度由固件决定，所有行程量纲的控件据此重设量程
+        self._apply_max_travel(caps["max_travel"])
+        # 保存语义：0xF2 仅写 RAM，0xF6 显式落 EEPROM
+        self._save_supported = True
         self._update_save_state()
         # 触底校准开关按固件当前运行态初始化：GUI 重启后能对上，不会误以为已关闭
         self._untoggle(self.chk_cal_full, bool(caps.get("bottom_out", 0)))
@@ -794,6 +863,8 @@ class AnalogTab(BasicEditor):
         self.container.set_keys(self.keyboard.keys, self.keyboard.encoders)
         self._build_ki_widget_map()
         self.container.setEnabled(True)
+        self.btn_disp_act_rel.setEnabled(True)
+        self.btn_disp_rt.setEnabled(True)
         self._show_global_mode()
         # 设备在行程页激活期间发生变更(热插拔/刷新)：rebuild 顶部停了 timer，
         # 这里按激活态恢复，否则要切走再切回标签高亮才恢复
@@ -874,23 +945,30 @@ class AnalogTab(BasicEditor):
                     self._ki_widgets[ki] = w
 
     def _update_all_keys_text(self):
-        """更新所有键面的配置值文字。仅数字，无符号。
-        第一行=触发点[+RT下行]，第二行=断开点[+RT上行]。
-        RT 关："{触发点}\\n{断开点}"；RT 开：四个数字各占 3 字符（右对齐前补空格），
-        这样每个键面都是等宽两行，键与键之间纵向对得齐。"""
+        """更新所有键面的配置值文字。两种显示模式由顶部按钮切换：
+        act_rel：上=断开点，下=触发点；rt：上=RT上行灵敏度，下=RT下行灵敏度，
+        未开 RT 或值为 0 不显示。列宽按满量程位数取，等宽对齐。"""
+        colw = len(str(self.max_travel))
         for ki, w in self._ki_widgets.items():
             cfg = self.configs.get(ki)
             if cfg is None:
                 w.text = ""
                 continue
-            if cfg.is_rt_enabled():
-                # 行序与行程区标尺一致：上=断开点/断开RT，下=触发点/触发RT
-                # 固定宽度：每个数字右对齐占 3 字符（前补空格），键与键之间才对得齐
-                w.text = "%3d %3d\n%3d %3d" % (cfg.release_point, cfg.rt_up,
-                                               cfg.actuation_point, cfg.rt_down)
+            if self._display_mode == "rt":
+                if not cfg.is_rt_enabled():
+                    w.text = ""
+                    continue
+                top = "%*d" % (colw, cfg.rt_up) if cfg.rt_up != 0 else ""
+                bot = "%*d" % (colw, cfg.rt_down) if cfg.rt_down != 0 else ""
+                w.text = "%s\n%s" % (top, bot) if (top or bot) else ""
             else:
-                w.text = "{}\n{}".format(cfg.release_point, cfg.actuation_point)
+                w.text = "%*d\n%*d" % (colw, cfg.release_point, colw, cfg.actuation_point)
         self.container.update()
+
+    def _set_display_mode(self, mode):
+        """切换键面显示模式：act_rel=触发/断开，rt=RT 灵敏度。"""
+        self._display_mode = mode
+        self._update_all_keys_text()
 
     # -------------------------------------------------------------- events
     def on_key_clicked(self):
@@ -1043,8 +1121,7 @@ class AnalogTab(BasicEditor):
             except Exception:
                 pass
         self._pending_config = None
-        # v3：0xF2 只写 RAM——标记"有未保存改动"，由"保存到 EEPROM"按钮提交。
-        # (v2 固件这一步实际已自动落盘，但 _save_supported=False，标记不外显)
+        # 0xF2 只写 RAM——标记"有未保存改动"，由"保存到 EEPROM"按钮提交。
         self._dirty = True
         self._update_save_state()
 
@@ -1072,7 +1149,7 @@ class AnalogTab(BasicEditor):
     def do_save(self):
         """点"保存到 EEPROM"：把 RAM 中全部模拟参数一次性提交(0xF6)。
 
-        v3 固件下 0xF2 只改 RAM，拖动期间零 flash 写入；这里先同步补发防抖窗内
+        0xF2 只改 RAM，拖动期间零 flash 写入；这里先同步补发防抖窗内
         的最后一次编辑，再发 0xF6 全量落盘——整轮调节只产生一次 EEPROM 提交。
         校准(0xF4)/恢复默认(0xF5)不走本按钮：它们在固件侧本就即时落盘。
         """

@@ -7,7 +7,7 @@ from collections import OrderedDict
 from keycodes.keycodes import RESET_KEYCODE, Keycode, recreate_keyboard_keycodes
 from kle_serial import Serial as KleSerial
 from protocol.alt_repeat_key import ProtocolAltRepeatKey
-from protocol.analog import ProtocolAnalog
+from protocol.analog import ProtocolAnalog, AnalogKeyConfig
 from protocol.combo import ProtocolCombo
 from protocol.constants import CMD_VIA_GET_PROTOCOL_VERSION, CMD_VIA_GET_KEYBOARD_VALUE, CMD_VIA_SET_KEYBOARD_VALUE, \
     CMD_VIA_SET_KEYCODE, CMD_VIA_LIGHTING_SET_VALUE, CMD_VIA_LIGHTING_GET_VALUE, CMD_VIA_LIGHTING_SAVE, \
@@ -17,7 +17,8 @@ from protocol.constants import CMD_VIA_GET_PROTOCOL_VERSION, CMD_VIA_GET_KEYBOAR
     VIALRGB_GET_SUPPORTED, VIALRGB_SET_MODE, CMD_VIAL_GET_KEYBOARD_ID, CMD_VIAL_GET_SIZE, CMD_VIAL_GET_DEFINITION, \
     CMD_VIAL_GET_ENCODER, CMD_VIAL_SET_ENCODER, CMD_VIAL_GET_UNLOCK_STATUS, CMD_VIAL_UNLOCK_START, CMD_VIAL_UNLOCK_POLL, \
     CMD_VIAL_LOCK, CMD_VIAL_QMK_SETTINGS_QUERY, CMD_VIAL_QMK_SETTINGS_GET, CMD_VIAL_QMK_SETTINGS_SET, \
-    CMD_VIAL_QMK_SETTINGS_RESET, BUFFER_FETCH_CHUNK, VIAL_PROTOCOL_QMK_SETTINGS
+    CMD_VIAL_QMK_SETTINGS_RESET, BUFFER_FETCH_CHUNK, VIAL_PROTOCOL_QMK_SETTINGS, \
+    ANALOG_FLAG_ACTUATION_OVERRIDE, ANALOG_FLAG_RT_ENABLED, ANALOG_PROTOCOL_VERSION
 from protocol.dynamic import ProtocolDynamic
 from protocol.key_override import ProtocolKeyOverride
 from protocol.macro import ProtocolMacro
@@ -404,6 +405,7 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
         data["key_override"] = self.save_key_override()
         data["alt_repeat_key"] = self.save_alt_repeat_key()
         data["settings"] = self.settings
+        data["analog"] = self.save_analog_layout()
 
         return json.dumps(data).encode("utf-8")
 
@@ -439,6 +441,96 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
             qsid = int(qsid)
             if QmkSettings.is_qsid_supported(qsid):
                 self.qmk_settings_set(qsid, value)
+
+        self.restore_analog_layout(data.get("analog"))
+
+    def save_analog_layout(self):
+        """导出 analog 配置供 .vil 携带：全局阈值/RT + 仅自定义键的阈值/RT/flags，不含锚点。"""
+        try:
+            caps = self.analog_get_caps()
+        except Exception:
+            return None
+        # 非 analog 固件会把请求包原样回显，version 对不上——挡掉，不写垃圾块
+        if caps.get("version") != ANALOG_PROTOCOL_VERSION or not caps.get("num_keys"):
+            return None
+        g = self.analog_get_global_config()
+        out = {
+            "max_travel": caps["max_travel"],
+            "num_keys": caps["num_keys"],
+            "global": {
+                "actuation": g.actuation_point,
+                "release": g.release_point,
+                "rt_down": g.rt_down,
+                "rt_up": g.rt_up,
+                "rt_enabled": bool(g.flags & ANALOG_FLAG_RT_ENABLED),
+            },
+            "keys": [],
+        }
+        for ki in range(caps["num_keys"]):
+            try:
+                cfg = self.analog_get_key_config(ki)
+            except Exception:
+                continue
+            # 跟随全局的键不导——恢复时写全局即级联
+            if not cfg.is_customized():
+                continue
+            out["keys"].append({
+                "ki": ki,
+                "actuation_point": cfg.actuation_point,
+                "release_point": cfg.release_point,
+                "rt_down": cfg.rt_down,
+                "rt_up": cfg.rt_up,
+                "flags": cfg.flags,
+            })
+        return out
+
+    def restore_analog_layout(self, data):
+        """从 .vil 恢复 analog 配置。max_travel 不符则不动现有；先全局后单键、末尾 0xF6 落盘。"""
+        if not data:
+            return
+        try:
+            caps = self.analog_get_caps()
+        except Exception:
+            return
+        # 满量程不符：按约定不改现有
+        if caps.get("max_travel") != data.get("max_travel"):
+            return
+        num_keys = caps["num_keys"]
+
+        # 先写全局槽(0xFFFF)：固件自动清 OVERRIDE 位、级联刷新所有跟随键
+        g = AnalogKeyConfig()
+        gd = data.get("global", {})
+        g.actuation_point = gd.get("actuation", g.actuation_point)
+        g.release_point = gd.get("release", g.release_point)
+        g.rt_down = gd.get("rt_down", g.rt_down)
+        g.rt_up = gd.get("rt_up", g.rt_up)
+        if gd.get("rt_enabled"):
+            g.flags |= ANALOG_FLAG_RT_ENABLED
+        self.analog_set_global_config(g)
+
+        # 再逐键写自定义键（仅文件里列出、且键号在范围内的）
+        for k in data.get("keys", []):
+            ki = k.get("ki")
+            if ki is None or ki < 0 or ki >= num_keys:
+                continue
+            cfg = AnalogKeyConfig()
+            cfg.actuation_point = k.get("actuation_point", cfg.actuation_point)
+            cfg.release_point = k.get("release_point", cfg.release_point)
+            cfg.rt_down = k.get("rt_down", cfg.rt_down)
+            cfg.rt_up = k.get("rt_up", cfg.rt_up)
+            # flags 原样带回并确保 OVERRIDE 置位（标记为自定义，不被全局级联冲掉）
+            cfg.flags = int(k.get("flags", 0)) | ANALOG_FLAG_ACTUATION_OVERRIDE
+            # 锚点不导入：从设备现读原样回填，0xF2 会顺写 raw_rest/raw_full
+            try:
+                cur = self.analog_get_key_config(ki)
+                cfg.raw_rest = cur.raw_rest
+                cfg.raw_full = cur.raw_full
+            except Exception:
+                pass
+            self.analog_set_key_config(ki, cfg)
+
+        # 0xF6：导入即生效（与 keymap"导入即写入"一致）
+        self.analog_persist_commit()
 
     def reset(self):
         self.usb_send(self.dev, struct.pack("B", 0xB))

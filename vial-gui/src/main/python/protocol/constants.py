@@ -51,19 +51,19 @@ DYNAMIC_VIAL_KEY_OVERRIDE_SET = 0x06
 DYNAMIC_VIAL_ALT_REPEAT_KEY_GET = 0x07
 DYNAMIC_VIAL_ALT_REPEAT_KEY_SET = 0x08
 
-# ---- Vial Analog Protocol Extension (静电容/磁轴, 行程 0-255) ----
-# 固件侧见 vial-qmk-wireless/docs/vial-analog-protocol.md
-# v2：子命令从 0x0E-0x13 迁移到 0xF0-0xF5 高位段，
-#     远离基础 Vial 子命令(0x00-0x0D 起)的上游低位增长区，规避冲突。
-# v3：0xF2 调参改为仅改 RAM(不落盘)，新增 0xF6 把 RAM 全量提交到 EEPROM——
-#     拖动滑块只动 RAM、不磨损 Flash，点 GUI "保存"才写 EEPROM。
+# ---- Vial Analog Protocol Extension (静电容/磁轴) ----
+# 固件侧见 vial-qmk-stg/docs/vial-analog-protocol.md
+# 行程域是 0..max_travel 的整数刻度(max_travel 由固件 ANALOG_MAX_TRAVEL 决定、
+# 经 0xF0 caps 的 msg[8..9] 上报)，不是固定的 0-255。
+# 子命令取 0xF0-0xF6 高位段：基础 Vial 子命令(0x00-0x0D)从低位向上增长且无扩展
+# 命名空间约定，取顶格可规避上游未来占用低位造成的冲突。
 CMD_VIAL_ANALOG_GET_CAPS         = 0xF0
 CMD_VIAL_ANALOG_GET_KEY_CONFIG   = 0xF1
 CMD_VIAL_ANALOG_SET_KEY_CONFIG   = 0xF2
 CMD_VIAL_ANALOG_GET_KEY_READINGS = 0xF3
 CMD_VIAL_ANALOG_CALIBRATE        = 0xF4
 CMD_VIAL_ANALOG_RESET_KEY        = 0xF5
-CMD_VIAL_ANALOG_PERSIST_COMMIT   = 0xF6  # v3：显式保存，把 RAM 全量落盘 EEPROM(GUI "保存"按钮)
+CMD_VIAL_ANALOG_PERSIST_COMMIT   = 0xF6  # 显式保存，把 RAM 全量落盘 EEPROM(GUI "保存"按钮)
 
 ANALOG_AXIS_NONE = 0
 ANALOG_AXIS_HALL = 1
@@ -88,8 +88,13 @@ ANALOG_CAL_AUTO_PEAK        = 3
 ANALOG_CAL_BOTTOM_OUT_ON    = 4  # 触底校准模式开：全部键等效 KC_NO，逐个按满即采集
 ANALOG_CAL_BOTTOM_OUT_OFF   = 5  # 触底校准模式关
 
-ANALOG_PROTOCOL_VERSION = 3  # 与固件 VIAL_ANALOG_PROTOCOL_VERSION 对应
-# v2=ID 迁移到 0xF0-0xF5；v3=0xF2 改为仅改 RAM(suppress 落盘)+新增 0xF6 显式保存
+ANALOG_PROTOCOL_VERSION = 1  # 与固件 VIAL_ANALOG_PROTOCOL_VERSION 对应；不一致即拒绝接管该标签页
+# 版本史已重置：早期开发期编号(0x0E-0x13 子命令、拉模型、每次 0xF2 自动落盘)全部废弃。
+
+# 行程域宽度的分界：满量程 <= 255 用 uint8。0..255 本就装得下 uint8，
+# 且默认满量程 255 必须走窄格式，否则默认板的协议包会无谓地整体膨胀。
+# 具体线格式尺寸由 protocol/analog.py 按本分界从 struct 格式串算出，不在此重复定义。
+ANALOG_TRAVEL_NARROW_MAX = 255
 
 # how much of a macro/keymap buffer we can read/write per packet
 BUFFER_FETCH_CHUNK = 28

@@ -22,8 +22,8 @@ from protocol.constants import CMD_VIA_GET_PROTOCOL_VERSION, CMD_VIA_VIAL_PREFIX
     DYNAMIC_VIAL_TAP_DANCE_SET, \
     CMD_VIAL_ANALOG_GET_CAPS, CMD_VIAL_ANALOG_GET_KEY_CONFIG, CMD_VIAL_ANALOG_SET_KEY_CONFIG, \
     CMD_VIAL_ANALOG_GET_KEY_READINGS, CMD_VIAL_ANALOG_CALIBRATE, CMD_VIAL_ANALOG_RESET_KEY, \
-    ANALOG_FLAG_RT_ENABLED, ANALOG_FLAG_ACTUATION_OVERRIDE, ANALOG_FLAG_CONTINUOUS, \
-    ANALOG_CAP_BOTTOM_OUT_CAL
+    CMD_VIAL_ANALOG_PERSIST_COMMIT, ANALOG_FLAG_RT_ENABLED, ANALOG_FLAG_ACTUATION_OVERRIDE, \
+    ANALOG_FLAG_CONTINUOUS, ANALOG_CAP_BOTTOM_OUT_CAL
 from widgets.square_button import SquareButton
 
 FAKE_KEYBOARD = """
@@ -89,10 +89,13 @@ class VirtualKeyboard:
         self.key_override_entries = 0
         self.alt_repeat_key_entries = 0
 
-        # ---- Vial Analog 协议模拟(0xF0-0xF5)，语义镜像固件 vial.c 翻译层 ----
+        # ---- Vial Analog 协议模拟(0xF0-0xF6)，语义镜像固件 vial.c 翻译层 ----
         self.analog_axis_type = 1  # hall
         self.analog_caps = 0x3F    # 五个基础能力位 + bit5 触底校准开关
         self.analog_bottom_out = False  # 0xF4 mode4/5 的运行态，随 caps 的 msg[7] 回报
+        # 行程域满量程(对应固件 ANALOG_MAX_TRAVEL)：<=255 走 uint8 线格式，否则 uint16。
+        # 测试里把它改成 >255 即可覆盖宽域分支。
+        self.analog_max_travel = 255
         # 全局默认槽(对应固件 g_analog_global：4 阈值 + RT 开关)
         self.analog_global = {"actuation": 200, "release": 192, "rt_down": 10, "rt_up": 10, "rt": False}
         # 每键配置：ki -> dict；出厂=跟随全局固件侧不存值，这里存"键上当前生效值"
@@ -143,12 +146,31 @@ class VirtualKeyboard:
             return b""
         raise RuntimeError("unsupported dynamic submsg 0x{:02X}".format(msg[2]))
 
+    # ---- 行程域宽度：镜像固件 analog_core.h 的判据(<=255 为窄) ----
+    def _analog_wide(self):
+        return self.analog_max_travel > 255
+
+    def _analog_cfg_fmt(self):
+        return "<HHHHBBHHH" if self._analog_wide() else "<BBBBBBHHH"
+
+    def _analog_cfg_size(self):
+        return struct.calcsize(self._analog_cfg_fmt())
+
+    def _analog_entry_size(self):
+        """0xF3 单条读数 = 行程(1 或 2 字节) + raw 2 字节。"""
+        return 4 if self._analog_wide() else 3
+
+    def _analog_max_readings(self):
+        """31 字节载荷能装多少条读数(固件同样按条目宽度算)。"""
+        return 31 // self._analog_entry_size()
+
     def _analog_cfg_bytes(self, ki):
-        """打包 12 字节线格式，位语义与固件一致：bit1 OVERRIDE=非跟随全局。"""
+        """打包线格式(窄 12 / 宽 16 字节)，位语义与固件一致：bit1 OVERRIDE=非跟随全局。"""
+        fmt = self._analog_cfg_fmt()
         if ki == 0xFFFF:
             g = self.analog_global
             flags = ANALOG_FLAG_RT_ENABLED if g["rt"] else 0
-            return struct.pack("<BBBBBBHHH", g["actuation"], g["release"], g["rt_down"], g["rt_up"],
+            return struct.pack(fmt, g["actuation"], g["release"], g["rt_down"], g["rt_up"],
                                flags, 0, 375, 675, 0)
         k = self.analog_keys[ki]
         flags = 0
@@ -158,7 +180,7 @@ class VirtualKeyboard:
             flags |= ANALOG_FLAG_ACTUATION_OVERRIDE
         if k["continuous"]:
             flags |= ANALOG_FLAG_CONTINUOUS
-        return struct.pack("<BBBBBBHHH", k["actuation"], k["release"], k["rt_down"], k["rt_up"],
+        return struct.pack(fmt, k["actuation"], k["release"], k["rt_down"], k["rt_up"],
                            flags, 0, k["raw_rest"], k["raw_full"], 0)
 
     def _analog_store(self, ki, act, rel, rtd, rtu, flags, raw_rest, raw_full):
@@ -178,10 +200,12 @@ class VirtualKeyboard:
         if cmd == CMD_VIAL_ANALOG_GET_CAPS:
             num = self.rows * self.cols
             # 布局按协议文档：msg[0]=ver, msg[1..2]=num_keys(LE16), msg[3]=axis,
-            # msg[4]=caps, msg[5]=max_readings, msg[6]=config_size, msg[7]=触底校准开关状态
-            return struct.pack("<BHBBBBB", 2, num,
-                               self.analog_axis_type, self.analog_caps, 10, 12,
-                               1 if self.analog_bottom_out else 0)
+            # msg[4]=caps, msg[5]=max_readings, msg[6]=config_size,
+            # msg[7]=触底校准开关状态, msg[8..9]=满量程(LE16)
+            return struct.pack("<BHBBBBBH", 1, num,
+                               self.analog_axis_type, self.analog_caps,
+                               self._analog_max_readings(), self._analog_cfg_size(),
+                               1 if self.analog_bottom_out else 0, self.analog_max_travel)
         # 0xF4 比其它命令多一个 mode 字节(msg[2])，键号从 msg[3] 起
         ki_off = 3 if cmd == CMD_VIAL_ANALOG_CALIBRATE else 2
         ki = struct.unpack_from("<H", msg, ki_off)[0]
@@ -189,7 +213,8 @@ class VirtualKeyboard:
         if cmd == CMD_VIAL_ANALOG_GET_KEY_CONFIG:
             return self._analog_cfg_bytes(ki)
         elif cmd == CMD_VIAL_ANALOG_SET_KEY_CONFIG:
-            act, rel, rtd, rtu, flags, _res, raw_rest, raw_full, _res2 = struct.unpack_from("<BBBBBBHHH", msg, 4)
+            (act, rel, rtd, rtu, flags, _res,
+             raw_rest, raw_full, _res2) = struct.unpack_from(self._analog_cfg_fmt(), msg, 4)
             self._analog_store(ki, act, rel, rtd, rtu, flags, raw_rest, raw_full)
             return b"\x00"
         elif cmd == CMD_VIAL_ANALOG_GET_KEY_READINGS:
@@ -197,9 +222,9 @@ class VirtualKeyboard:
             n = 0
             for k in range(ki, self.rows * self.cols):
                 travel, raw = self.analog_readings.get(k, (0, 0))
-                entries += struct.pack("<BH", travel, raw)
+                entries += struct.pack("<HH" if self._analog_wide() else "<BH", travel, raw)
                 n += 1
-                if n == 10:
+                if n == self._analog_max_readings():
                     break
             return struct.pack("<B", n) + entries
         elif cmd == CMD_VIAL_ANALOG_CALIBRATE:
@@ -239,6 +264,8 @@ class VirtualKeyboard:
                           "rt_down": g["rt_down"], "rt_up": g["rt_up"], "rt": g["rt"],
                           "customized": False})  # 校准锚点保留
             return b"\x00"
+        elif cmd == CMD_VIAL_ANALOG_PERSIST_COMMIT:
+            return b"\x00"
         raise RuntimeError("unknown analog command 0x{:02X}".format(cmd))
 
     def vial_cmd(self, msg):
@@ -255,7 +282,7 @@ class VirtualKeyboard:
             return b"\xFF" * 32
         elif msg[1] == CMD_VIAL_DYNAMIC_ENTRY_OP:
             return self.vial_cmd_dynamic(msg)
-        elif CMD_VIAL_ANALOG_GET_CAPS <= msg[1] <= CMD_VIAL_ANALOG_RESET_KEY:
+        elif CMD_VIAL_ANALOG_GET_CAPS <= msg[1] <= CMD_VIAL_ANALOG_PERSIST_COMMIT:
             return self.vial_cmd_analog(msg)
         raise RuntimeError("unknown command for Vial protocol 0x{:02X}".format(msg[1]))
 
@@ -740,9 +767,12 @@ def test_analog_tab(qtbot):
 
     tab = mw.analog_tab
     assert tab.valid()
-    assert tab.caps["version"] == 2
+    assert tab.caps["version"] == 1
     assert tab.num_keys == 4
     assert tab.rows == 2 and tab.cols == 2
+    # 窄域(默认满量程 255)：12 字节配置、每包最多 10 条读数
+    assert tab.caps["max_travel"] == 255 and tab.max_travel == 255
+    assert tab.caps["config_size"] == 12 and tab.caps["max_readings"] == 10
 
     # 未选键 → 全局模式：手柄显示固件全局槽的值；行程与三个读数是无意义占位
     assert tab.selected is None
@@ -839,3 +869,107 @@ def test_analog_tab(qtbot):
     resets = [e for e in vk.analog_cmd_log if e[0] == CMD_VIAL_ANALOG_RESET_KEY]
     assert resets == [(CMD_VIAL_ANALOG_RESET_KEY, 0xFFFF)]
     assert tab.track.actuation == 200
+
+
+def test_analog_wide_travel(qtbot):
+    """满量程 >255：行程域升为 uint16，GUI 必须全程按 caps 自适应，不得写死 255/12 字节。"""
+    mw, vk = prepare(qtbot, FAKE_KEYBOARD)
+    tab = mw.analog_tab
+    assert tab.caps["config_size"] == 12 and tab.caps["max_readings"] == 10
+
+    # 换一台宽域固件，重新握手
+    vk.analog_max_travel = 4096
+    tab.rebuild(tab.device)
+    assert tab.caps["max_travel"] == 4096
+    assert tab.caps["config_size"] == 16 and tab.caps["max_readings"] == 7
+    # 满量程铺到行程轨道、RT 滑块量程与末端刻度
+    assert tab.max_travel == 4096 and tab.track.max_travel == 4096
+    for s in tab.rt_sliders.values():
+        assert s.maximum() == 4096
+    for lbl in tab.rt_end_labels.values():
+        assert lbl.text() == "4096"
+
+    # 16 字节线格式往返：>255 的行程值必须完整存活（窄格式会截掉高位字节）
+    vk.analog_cmd_log.clear()
+    g = tab._get_global_config()
+    g.actuation_point, g.release_point = 3000, 2500
+    assert tab.device.keyboard.analog_set_global_config(g)
+    assert vk.analog_global["actuation"] == 3000
+    assert vk.analog_global["release"] == 2500
+
+    # 0xF3 条目按 4 字节拆：宽域读数回到 >255 的行程值
+    w = tab._ki_widgets[2]
+    tab.container.active_key = w
+    tab.on_key_clicked()
+    vk.analog_readings[2] = (3000, 500)
+    tab.poll()
+    assert tab.track.travel == 3000
+    assert "500" in tab.lbl_raw.text()
+
+    # 键面等宽列随量程位数变宽(4 位 -> 每列 4 字符)，否则宽域数字会串列
+    tab._load_all_configs()
+    cfg = tab.configs[2]
+    cfg.rt_down, cfg.rt_up = 10, 10
+    cfg.flags |= ANALOG_FLAG_RT_ENABLED
+    tab._update_all_keys_text()
+    # act_rel 模式(默认)：上=断开点 下=触发点，各 4 字符右对齐
+    expected = "%4d\n%4d" % (cfg.release_point, cfg.actuation_point)
+    assert w.text == expected, repr(w.text)
+    assert len(w.text.split("\n")[0]) == 4  # 宽域 4 字符；窄域 3 字符
+    # RT 模式：切到 RT 显示，开 RT 的键显示灵敏度(0 不显示)
+    tab.btn_disp_rt.setChecked(True)
+    assert w.text == "%4d\n%4d" % (cfg.rt_up, cfg.rt_down), repr(w.text)
+    # RT 值含 0：0 不显示，另一行保留
+    cfg.rt_up = 0
+    tab._update_all_keys_text()
+    assert w.text == "\n%4d" % cfg.rt_down, repr(w.text)
+    # 切回 act_rel
+    tab.btn_disp_act_rel.setChecked(True)
+    assert w.text == expected, repr(w.text)
+
+
+def test_analog_vil_export_import(qtbot):
+    """analog 配置随 .vil 导入导出：只含全局+自定义键阈值/RT/flags，不含锚点；max_travel 不符则不改。"""
+    import json
+    mw, vk = prepare(qtbot, FAKE_KEYBOARD)
+    # 注入：全局值 + 两个自定义键(键1带 CONTINUOUS)，键0/2 跟随全局不导出
+    vk.analog_global = {"actuation": 150, "release": 100, "rt_down": 8, "rt_up": 7, "rt": True}
+    vk.analog_keys[1].update({"actuation": 130, "release": 90, "rt_down": 5, "rt_up": 6,
+                              "rt": True, "customized": True, "continuous": True,
+                              "raw_rest": 375, "raw_full": 675})
+    vk.analog_keys[3].update({"actuation": 140, "release": 95, "rt_down": 9, "rt_up": 4,
+                              "rt": False, "customized": True, "continuous": False,
+                              "raw_rest": 375, "raw_full": 675})
+
+    # 导出：.vil JSON 含 analog 块
+    data = mw.keymap_editor.save_layout()
+    obj = json.loads(data.decode("utf-8"))
+    a = obj["analog"]
+    assert a["max_travel"] == 255 and a["num_keys"] == 4
+    assert a["global"] == {"actuation": 150, "release": 100, "rt_down": 8, "rt_up": 7, "rt_enabled": True}
+    assert len(a["keys"]) == 2  # 只导自定义键
+    k1 = next(k for k in a["keys"] if k["ki"] == 1)
+    assert k1["actuation_point"] == 130 and k1["release_point"] == 90
+    assert k1["flags"] & ANALOG_FLAG_ACTUATION_OVERRIDE
+    assert k1["flags"] & ANALOG_FLAG_CONTINUOUS
+    assert "raw_rest" not in k1 and "raw_full" not in k1  # 锚点不导出
+
+    # 导入：先重置 vk 状态，再 restore
+    vk.analog_global = {"actuation": 200, "release": 192, "rt_down": 10, "rt_up": 10, "rt": False}
+    for ki in range(4):
+        vk.analog_keys[ki].update({"actuation": 200, "release": 192, "rt_down": 10, "rt_up": 10,
+                                   "rt": False, "customized": False, "continuous": False,
+                                   "raw_rest": 375, "raw_full": 675})
+    mw.keymap_editor.restore_layout(data)
+    assert vk.analog_global == {"actuation": 150, "release": 100, "rt_down": 8, "rt_up": 7, "rt": True}
+    assert vk.analog_keys[1]["actuation"] == 130 and vk.analog_keys[1]["customized"]
+    assert vk.analog_keys[1]["continuous"]
+    assert vk.analog_keys[1]["raw_rest"] == 375  # 锚点未被导入覆盖
+    assert vk.analog_keys[3]["actuation"] == 140
+
+    # max_travel 不符则不动现有
+    bad = json.loads(data.decode("utf-8"))
+    bad["analog"]["max_travel"] = 4096
+    before = dict(vk.analog_global)
+    mw.keymap_editor.restore_layout(json.dumps(bad).encode("utf-8"))
+    assert vk.analog_global == before

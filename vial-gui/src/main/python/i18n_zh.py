@@ -277,6 +277,9 @@ _RAW = {
     ("AnalogTab", "Saved to EEPROM"): "已保存到 EEPROM",
     ("AnalogTab", "Save failed"): "保存失败",
     ("AnalogTab", "Save failed: {}"): "保存失败：{}",
+    ("AnalogTab", "Key display:"): "键面显示：",
+    ("AnalogTab", "Act/Rel"): "触发/断开",
+    ("AnalogTab", "RT"): "RT",
 }
 
 
