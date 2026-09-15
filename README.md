@@ -96,6 +96,31 @@ CJK 码位从回退字体同字号取字，不再整体缩放。注册失败只�
 按实际文案裁剪，但裁剪版属于 Modified Version，须按 OFL 第 3 条改用
 非保留字体名。）
 
+#### 字体与 Git LFS
+
+`src/fonts/` 下的两个字体（`NotoSansSC-Regular.otf` 7.95 MB、
+`Inter-Regular.ttf` 0.33 MB）走 **Git LFS** 存储：仓库里保存的是几百字节的
+指针文件，真实内容在 LFS 对象库中。`.gitattributes` 里的
+`*.otf` / `*.ttf` / `*.ttc` 即为对应的 filter 声明。
+
+**克隆前请先装好 Git LFS，否则这两个文件会是指针文本而非真字体**
+（构建产物会缺字体，Web 版中文渲染成方框）：
+
+```
+git lfs install          # 每台机器执行一次
+git clone <repo>         # 之后正常克隆即可自动拉取字体
+```
+
+若已经克隆过、发现 `src/fonts/*.otf` 只有 132 字节（指针），补拉：
+
+```
+git lfs pull
+```
+
+历史对象已于 2026-09-14 用 `git lfs migrate import --include="*.otf,*.ttf,*.ttc"`
+迁移完成，故**克隆下来的历史里也不再包含 8.3 MB 的普通 blob**。
+（该迁移重写了提交历史，迁移前的 SHA 已失效。）
+
 ### 桌面版
 
 ```
