@@ -79,6 +79,13 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
         self.layout = dict()
         self.encoder_layout = dict()
 
+        # 作废 analog 握手缓存：reload 可能换了设备或固件已重刷，
+        # 沿用旧 caps 会按错误的键数/满量程/字段宽度去解析。
+        # （caps 里的 bottom_out 还是运行态，更不该跨重连复用。）
+        for attr in ("_analog_caps", "_analog_max_travel", "_analog_num_keys"):
+            if hasattr(self, attr):
+                delattr(self, attr)
+
         self.reload_layout(sideload_json)
         self.reload_layers()
 
@@ -447,11 +454,13 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
     def save_analog_layout(self):
         """导出 analog 配置供 .vil 携带：全局阈值/RT + 仅自定义键的阈值/RT/flags，不含锚点。"""
         try:
-            caps = self.analog_get_caps()
+            caps = self.analog_caps()
         except Exception:
             return None
         # 非 analog 固件会把请求包原样回显，version 对不上——挡掉，不写垃圾块
         if caps.get("version") != ANALOG_PROTOCOL_VERSION or not caps.get("num_keys"):
+            return None
+        if not caps.get("config_bytes_ok"):
             return None
         g = self.analog_get_global_config()
         out = {
@@ -468,7 +477,9 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
         }
         for ki in range(caps["num_keys"]):
             try:
-                cfg = self.analog_get_key_config(ki)
+                # 批量遍历用小 retries：默认 20 次是给单次交互的，叠加到 96 键上
+                # 会在掉线时把 GUI 线程阻塞到看起来像卡死（见 analog.py 的约定）。
+                cfg = self.analog_get_key_config(ki, retries=3)
             except Exception:
                 continue
             # 跟随全局的键不导——恢复时写全局即级联
@@ -489,24 +500,34 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
         if not data:
             return
         try:
-            caps = self.analog_get_caps()
+            caps = self.analog_caps()
         except Exception:
+            return
+        # 协议版本必须等值：版本不同意味着线格式/语义可能变过，
+        # 按旧格式写进去会得到一条畸形配置（与 save 路径口径一致）。
+        if caps.get("version") != ANALOG_PROTOCOL_VERSION:
             return
         # 满量程不符：按约定不改现有
         if caps.get("max_travel") != data.get("max_travel"):
             return
+        # 固件线格式宽度自洽性不过：不导入（否则按错偏移写出一条畸形配置）
+        if not caps.get("config_bytes_ok"):
+            return
         num_keys = caps["num_keys"]
 
-        # 先写全局槽(0xFFFF)：固件自动清 OVERRIDE 位、级联刷新所有跟随键
-        g = AnalogKeyConfig()
-        gd = data.get("global", {})
-        g.actuation_point = gd.get("actuation", g.actuation_point)
-        g.release_point = gd.get("release", g.release_point)
-        g.rt_down = gd.get("rt_down", g.rt_down)
-        g.rt_up = gd.get("rt_up", g.rt_up)
-        if gd.get("rt_enabled"):
-            g.flags |= ANALOG_FLAG_RT_ENABLED
-        self.analog_set_global_config(g)
+        # 先写全局槽(0xFFFF)：固件自动清 OVERRIDE 位、级联刷新所有跟随键。
+        # 缺 global 块时**跳过**：不能拿 AnalogKeyConfig 的构造默认值(120/80/10/10)
+        # 去写，那会把用户现有的全局阈值静默覆盖掉（随后 0xF6 还会落盘）。
+        gd = data.get("global")
+        if gd:
+            g = AnalogKeyConfig()
+            g.actuation_point = gd.get("actuation", g.actuation_point)
+            g.release_point = gd.get("release", g.release_point)
+            g.rt_down = gd.get("rt_down", g.rt_down)
+            g.rt_up = gd.get("rt_up", g.rt_up)
+            if gd.get("rt_enabled"):
+                g.flags |= ANALOG_FLAG_RT_ENABLED
+            self.analog_set_global_config(g)
 
         # 再逐键写自定义键（仅文件里列出、且键号在范围内的）
         for k in data.get("keys", []):
@@ -520,9 +541,10 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
             cfg.rt_up = k.get("rt_up", cfg.rt_up)
             # flags 原样带回并确保 OVERRIDE 置位（标记为自定义，不被全局级联冲掉）
             cfg.flags = int(k.get("flags", 0)) | ANALOG_FLAG_ACTUATION_OVERRIDE
-            # 锚点不导入：从设备现读原样回填，0xF2 会顺写 raw_rest/raw_full
+            # 锚点不导入：从设备现读原样回填，0xF2 会顺写 raw_rest/raw_full。
+            # 用 retries=3：这也在批量循环里。
             try:
-                cur = self.analog_get_key_config(ki)
+                cur = self.analog_get_key_config(ki, retries=3)
                 cfg.raw_rest = cur.raw_rest
                 cfg.raw_full = cur.raw_full
             except Exception:

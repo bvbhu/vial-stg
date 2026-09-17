@@ -77,7 +77,7 @@ _RAW = {
         "按住以下按键，直到下方进度条走满：",                        # [老]
 
     # ==================== 键位/按键面板 ====================
-    ("KeycodePanel", "Any"): "任意",
+    # ("KeycodePanel", "Any") 不翻译：用户要求 "Any" 键码保持英文原文
     ("TabbedKeycodes", "Basic"): "基本按键",                            # [老]
     ("TabbedKeycodes", "ISO/JIS"): "ISO/JIS",
     ("TabbedKeycodes", "Layers"): "层控制",                             # [老]
@@ -277,6 +277,15 @@ _RAW = {
     ("AnalogTab", "Saved to EEPROM"): "已保存到 EEPROM",
     ("AnalogTab", "Save failed"): "保存失败",
     ("AnalogTab", "Save failed: {}"): "保存失败：{}",
+    ("AnalogTab", "{} key(s) could not be read; saving is disabled"):
+        "有 {} 个键读取失败，已禁用保存",
+    ("AnalogTab", "{} key(s) could not be read; reconnect before saving"):
+        "有 {} 个键读取失败，请重新连接后再保存",
+    ("AnalogTab", "This key could not be read; reconnect to edit it"):
+        "该键读取失败，请重新连接后再编辑",
+    ("AnalogTab", "Write failed: {}"): "写入失败：{}",
+    ("AnalogTab", "rejected by firmware"): "固件拒绝",
+    ("AnalogTab", "Not saved: last change was not written"): "未保存：最后一次改动未能写入",
     ("AnalogTab", "Key display:"): "键面显示：",
     ("AnalogTab", "Act/Rel"): "触发/断开",
     ("AnalogTab", "RT"): "RT",

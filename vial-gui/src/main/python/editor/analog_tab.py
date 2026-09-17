@@ -27,6 +27,8 @@ GUI 不假设它是 255，所有行程量纲的控件(标尺、手柄、RT 滑�
 协议见 protocol/analog.py 与 vial-qmk-stg/docs/vial-analog-protocol.md。
 """
 
+import time
+
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QEvent, QRect, QRectF
 from PyQt5.QtGui import QFont, QFontMetrics, QPainter, QPalette, QColor
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSlider, QStyle,
@@ -38,21 +40,19 @@ from util import tr, KeycodeDisplay
 from widgets.keyboard_widget import KeyboardWidget, KeyWidget
 from protocol.constants import (ANALOG_AXIS_NONE, ANALOG_FLAG_RT_ENABLED,
                                 ANALOG_FLAG_ACTUATION_OVERRIDE,
-                                ANALOG_CAL_SAMPLE_REST, ANALOG_CAL_SAMPLE_FULL,
+                                ANALOG_CAL_SAMPLE_REST,
                                 ANALOG_CAL_BOTTOM_OUT_ON, ANALOG_CAL_BOTTOM_OUT_OFF,
                                 ANALOG_CAP_BOTTOM_OUT_CAL,
                                 ANALOG_PROTOCOL_VERSION)
 from protocol.analog import AnalogKeyConfig, ANALOG_DEFAULT_MAX_TRAVEL
 from unlocker import Unlocker
-from constants import (KEY_SIZE_RATIO, KEY_SPACING_RATIO, KEY_ROUNDNESS,
-                       SHADOW_TOP_PADDING, SHADOW_BOTTOM_PADDING)
 
 
 def _retain_space(widget):
     """隐藏时保留占位。
 
     面板里凡是会"按状态出现/消失"的控件都要走这里：隐藏只能留白，
-    绝不允许把旁边的控件挤动（用户要求：隐藏内容不要影响布局）。
+    绝不允许把旁边的控件挤动。
     """
     sp = widget.sizePolicy()
     sp.setRetainSizeWhenHidden(True)
@@ -78,9 +78,11 @@ class TravelProgressBar(QWidget):
 
     _BAR_X0 = 8        # 列1：行程进度条
     _BAR_X1 = 30
-    _SCALE_X = 36      # 列2：0 / 行程 N / 255
+    _SCALE_X = 36      # 列2：0 / 行程 N / 255   —— 列宽见 _apply_scale_metrics()
     _TRACK_X = 92      # 列3：手柄轨道（蓝色竖线）中心
     _LABEL_X = 114     # 列4：手柄名称+数值
+    _SCALE_W_MIN = 54  # 列2 最小宽度：窄域(255)下的原始像素栅格，保证不后退
+    _scale_w = _SCALE_W_MIN  # 列2 实际宽度，由 _apply_scale_metrics() 按字体实测更新
     _MARGIN = 4        # 上下留白
     _LABEL_BLOCK = 30  # 两行标注的最小占位高度（碰撞避让用）
 
@@ -107,6 +109,22 @@ class TravelProgressBar(QWidget):
         self._track_proxy.hide()
         self.setMinimumSize(200, 260)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self._apply_scale_metrics()
+
+    def _apply_scale_metrics(self):
+        """按标尺所需的列宽重算列2 宽度与列3/列4 的 x，替掉固定像素栅格。
+
+        用位数（而非运行环境字体度量）估算宽度，保证布局只随满量程位数变化、
+        不随系统字体/缩放漂移：窄域(255，"Travel"6字符)恰好落在原始栅格
+        (_TRACK_X=92、_LABEL_X=114)；满量程数字位数更多时才右移让位。
+        """
+        # 每字符固定估算宽度（与默认 GUI 字体近似）；取 "0"/满量程/"Travel" 中最长串。
+        longest = max(("0", str(self.max_travel), tr("AnalogTab", "Travel")), key=len)
+        need = len(longest) * 8 + 6
+        self._scale_w = max(self._SCALE_W_MIN, need)
+        self._TRACK_X = self._SCALE_X + self._scale_w + 2
+        self._LABEL_X = self._TRACK_X + 22
+        self.update()
 
     # ------------------------------------------------------------ 值接口 ----
     def set_max_travel(self, max_travel):
@@ -123,6 +141,8 @@ class TravelProgressBar(QWidget):
         self.release = max(0, min(max_travel, self.release))
         if self.travel is not None:
             self.travel = max(0, min(max_travel, self.travel))
+        # 满量程位数变了，标尺列宽随之重算（窄 3 位 -> 宽 4 位）
+        self._apply_scale_metrics()
         self.update()
 
     def set_points(self, actuation, release, travel=None):
@@ -294,18 +314,19 @@ class TravelProgressBar(QWidget):
         bar_w = self._BAR_X1 - self._BAR_X0
 
         # 列1/列2（行程进度条 + 行程读数）：仅在选中按键时绘制。
-        # 全局模式下"当前行程"对全局槽没有意义（用户图1 指的就是这两列），
+        # 全局模式下"当前行程"对全局槽没有意义，指的就是这两列，
         # 但列3/列4 的触发/断开设置轨与手柄必须保留——那正是全局参数本身。
         # 只跳过绘制、不改尺寸，所以隐藏这两列不会影响布局。
         if self._travel_cols:
             # 列2 刻度：顶 0、其下"行程 N"实时读数、底 满量程(固件 ANALOG_MAX_TRAVEL)
             qp.setPen(text_color)
-            qp.drawText(QRect(self._SCALE_X, top - 2, 54, 16), Qt.AlignLeft | Qt.AlignVCenter, "0")
-            qp.drawText(QRect(self._SCALE_X, bot - 14, 54, 16), Qt.AlignLeft | Qt.AlignVCenter,
+            sw = self._scale_w
+            qp.drawText(QRect(self._SCALE_X, top - 2, sw, 16), Qt.AlignLeft | Qt.AlignVCenter, "0")
+            qp.drawText(QRect(self._SCALE_X, bot - 14, sw, 16), Qt.AlignLeft | Qt.AlignVCenter,
                         str(self.max_travel))
-            qp.drawText(QRect(self._SCALE_X, top + 20, 54, 16), Qt.AlignLeft | Qt.AlignVCenter,
+            qp.drawText(QRect(self._SCALE_X, top + 20, sw, 16), Qt.AlignLeft | Qt.AlignVCenter,
                         tr("AnalogTab", "Travel"))
-            qp.drawText(QRect(self._SCALE_X, top + 38, 54, 20), Qt.AlignLeft | Qt.AlignTop,
+            qp.drawText(QRect(self._SCALE_X, top + 38, sw, 20), Qt.AlignLeft | Qt.AlignTop,
                         "—" if self.travel is None else str(self.travel))
 
             # 列1 行程进度条：比背景更暗的凹槽 + 高亮填充（0 在上，按下后向下生长）
@@ -579,7 +600,10 @@ class AnalogTab(BasicEditor):
         self._selected_widget = None  # 当前选中键的 KeyWidget 引用
         self._ki_widgets = {}  # ki → KeyWidget 映射（批量更新键面文字用）
         self._all_configs_loaded = False  # 全局模式：是否已加载全部键配置
+        self._unread_keys = set()  # 最近一次批量读失败的键索引（非空即禁止落盘）
         self._global_cfg = None  # 全局默认配置缓存（固件 0xFFFF 槽）
+        self._unlock_checked = 0.0  # 上次查 get_unlock_status 的 monotonic 时刻
+        self._unlock_state = None   # 缓存值：None=尚未查过
         self._loading_ui = False  # 程序化装载 UI 期间抑制 on_slider_changed
         self._active = False      # 本标签当前是否激活(显示中)，决定 rebuild 后是否重启轮询
         # 保存语义：_dirty=RAM 有改动未落盘；_save_supported=固件支持 0xF6 显式落盘
@@ -596,6 +620,11 @@ class AnalogTab(BasicEditor):
         self._flush_timer.setInterval(150)
         self._flush_timer.timeout.connect(self.flush_config)
         self._pending_config = None
+
+        # 键面文字重绘的合并定时器（拖动滑块时避免整张键盘每像素重刷）
+        self._keys_text_timer = QTimer()
+        self._keys_text_timer.setSingleShot(True)
+        self._keys_text_timer.timeout.connect(self._on_keys_text_timer)
 
         self._build_ui()
         layout_editor.changed.connect(self.on_layout_changed)
@@ -713,7 +742,7 @@ class AnalogTab(BasicEditor):
         note.setWordWrap(True)
         mid_col.addWidget(note)
 
-        # "该键跟随全局值"移到 RT 栏下方（用户要求）
+        # 跟随全局复选框放在 RT 栏下方
         mid_col.addStretch(1)
         self.chk_follow = _retain_space(QCheckBox(tr("AnalogTab", "This key follows global values")))
         self.chk_follow.toggled.connect(self.on_follow_toggled)
@@ -755,13 +784,20 @@ class AnalogTab(BasicEditor):
         dv.addLayout(main_row)
 
         # 底：原始读数一行（原始 ADC / 初始 / 触底）+ 操作结果状态行
-        # 选中键的键码显示在左侧预览键帽上，不再单独占一行
+        # 选中键的键码显示在左侧预览键帽上，本行不重复显示
         self.lbl_raw = _retain_space(QLabel(""))
         dv.addWidget(self.lbl_raw)
         self.lbl_status = QLabel("")
         self.lbl_status.setWordWrap(True)
         self.lbl_status.setStyleSheet("color: gray;")
         dv.addWidget(self.lbl_status)
+
+        # 操作结果状态行：显示若干秒后自动清空，免得旧结果一直挂着被误读成当前状态。
+        # 必须放在 lbl_status 创建之后（本方法内），否则 __init__ 阶段连它时报 AttributeError。
+        self._status_timer = QTimer()
+        self._status_timer.setSingleShot(True)
+        self._status_timer.setInterval(4000)
+        self._status_timer.timeout.connect(self.lbl_status.clear)
 
         pv.addWidget(self._detail_panel)
         self._detail_panel.hide()
@@ -820,6 +856,8 @@ class AnalogTab(BasicEditor):
         self.keyboard = None
         self._selected_widget = None
         self._all_configs_loaded = False
+        self._unread_keys = set()
+        self._unlock_state = None
         self._global_cfg = None
         # 设备变更：上一设备未下发的编辑/未保存标记全部作废（RAM 状态已不可知）
         self._pending_config = None
@@ -831,10 +869,14 @@ class AnalogTab(BasicEditor):
         self.btn_disp_rt.setEnabled(False)
         if device is None or device.keyboard is None:
             self.container.setEnabled(False)
+            self._force_bottom_out_off()
             self._untoggle(self.chk_cal_full, False)
             return
         try:
-            caps = device.keyboard.analog_get_caps()
+            # 重新握手：必须发 0xF0 取最新 caps，不能命中 _analog_caps 缓存
+            # （设备可能已更换 / 固件运行态已变）。refresh=True 同时刷新缓存，
+            # 保证后续 .vil 保存/恢复走的是这一份。
+            caps = device.keyboard.analog_caps(refresh=True)
         except Exception:
             caps = None
         # 不支持 analog 的固件会把请求包原样回显，于是 version 会读成 0xFE/0xFF、
@@ -842,9 +884,17 @@ class AnalogTab(BasicEditor):
         # 版本号等值判定：GUI 与固件同步更新，不接受任何其他版本。
         if not caps or caps["version"] != ANALOG_PROTOCOL_VERSION:
             self.container.setEnabled(False)
+            self._force_bottom_out_off()
             return
         if caps["axis_type"] == ANALOG_AXIS_NONE or caps["num_keys"] == 0:
             self.container.setEnabled(False)
+            self._force_bottom_out_off()
+            return
+        # 固件声明的配置字节数(msg[6])与满量程推导出的宽度必须一致：不一致说明按
+        # 错误偏移解析整条配置，直接判为不支持，别带着错位去读写设备。
+        if not caps.get("config_bytes_ok", False):
+            self.container.setEnabled(False)
+            self._force_bottom_out_off()
             return
         self.caps = caps
         self.num_keys = caps["num_keys"]
@@ -884,6 +934,24 @@ class AnalogTab(BasicEditor):
         self._timer.stop()
         # 离开页面前把未下发编辑同步落进 RAM（仍不发 0xF6，落盘由用户点"保存"）
         self._flush_pending()
+        # 触底校准是**固件侧的运行态**：开关还开着就离开（切页/切键盘/拔线），
+        # 固件会一直停在"全部键等效 KC_NO"，键盘看起来像坏了。离开即显式关闭。
+        if self.chk_cal_full.isChecked():
+            self._untoggle(self.chk_cal_full, False)
+            self._force_bottom_out_off()
+
+    def _force_bottom_out_off(self):
+        """尽力让固件退出触底校准模式（不发信号，不依赖 UI 开关状态）。
+
+        用于 rebuild/deactivate 等"离开"路径：只要可能处于该模式就补发一次 OFF。
+        失败静默——设备可能已断开，此时无从补救，下次重连时 rebuild 会再试。
+        """
+        try:
+            kb = getattr(self.device, "keyboard", None) if self.device else None
+            if kb is not None:
+                kb.analog_calibrate(ANALOG_CAL_BOTTOM_OUT_OFF, 0xFFFF)
+        except Exception:
+            pass
 
     # ------------------------------------------------------ global mode ----
     def _show_key_detail(self, visible):
@@ -912,15 +980,28 @@ class AnalogTab(BasicEditor):
         self._set_readings(None, None, None)
 
     def _load_all_configs(self):
-        """懒加载全部键配置（0xF1 × num_keys 次事务），仅首次真正读 USB。"""
+        """连接时一次性读全部键配置（0xF1 × num_keys 次事务），只读一次。
+
+        批量读用 retries=3：默认的 20 次重试是给单次交互的，96 键板叠加起来在
+        掉线时会长时间阻塞 GUI 线程。读不到的键先占位（UI 需要该索引存在），
+        但记进 _unread_keys 并在保存前拦住——否则 0xF6 会把占位的默认值当真值
+        写进 EEPROM，而这些键的真实配置就被覆盖了。
+        """
         if self._all_configs_loaded or self.device is None:
             return
+        unread = []
         for ki in range(self.num_keys):
             try:
-                self.configs[ki] = self.device.keyboard.analog_get_key_config(ki)
+                self.configs[ki] = self.device.keyboard.analog_get_key_config(ki, retries=3)
             except Exception:
                 self.configs[ki] = AnalogKeyConfig()
+                unread.append(ki)
         self._all_configs_loaded = True
+        self._unread_keys = set(unread)
+        if unread:
+            self._flash_status(tr("AnalogTab", "{} key(s) could not be read; saving is disabled")
+                               .format(len(unread)))
+            self._update_save_state()
 
     def _get_global_config(self):
         """全局默认配置：优先 RAM 缓存（全局调节即时生效），否则读固件 0xFFFF 槽。"""
@@ -997,8 +1078,8 @@ class AnalogTab(BasicEditor):
         self._timer.start()
 
     def on_key_deselected(self):
-        # 同 on_key_clicked：先落旧键，再清 selected（原来的 _flush_timer.stop()
-        # 直接丢弃编辑，等于静默吞掉用户最后一次拖动）
+        # 先落旧键，再清 selected：直接停 _flush_timer 会丢弃防抖窗内的编辑，
+        # 等于静默吞掉用户最后一次拖动。
         self._flush_pending()
         self.selected = None
         # 不停 _timer：矩阵按下高亮与选键无关，只要本标签激活就持续刷新
@@ -1099,37 +1180,70 @@ class AnalogTab(BasicEditor):
             # 拖动即"转自定义"：跟随全局复选框同步取消勾选（信号已屏蔽，不会递归）
             if self.chk_follow.isChecked():
                 self._untoggle(self.chk_follow, False)
-        self._update_all_keys_text()
+        self._schedule_keys_text_update()
         self._flush_timer.start()
 
+    def _schedule_keys_text_update(self):
+        """合并高频重绘：拖动滑块时每次像素变化都重刷整张键盘会很卡。
+
+        缓存更新(pending/configs)必须立刻做，但"刷新所有键面文字 + 重绘"这类
+        纯显示动作可以合并——用一个 0 延时的单发定时器，在一轮事件循环内只做一次。
+        """
+        if not self._keys_text_timer.isActive():
+            self._keys_text_timer.start(0)
+
+    def _on_keys_text_timer(self):
+        self._keys_text_timer.stop()
+        self._update_all_keys_text()
+
     def flush_config(self):
+        """把 _pending_config 下发到设备。返回 True 表示已成功写入（或无需写入）。"""
         if self._pending_config is None:
-            return
-        if self.selected is None:
-            # 全局模式：只写固件全局槽(0xFFFF)。跟随全局键由固件 analog_set_global
-            # 级联刷新；这里绝不能逐键补写——0xF2 单键写在固件侧会清 FOLLOW_GLOBAL，
-            # 一次全局调节就会把所有键都标成"已自定义"，全局模式从此失效。
-            try:
-                self.device.keyboard.analog_set_global_config(self._pending_config)
-            except Exception:
-                pass
-        else:
-            cfg = self._pending_config
-            self.configs[self.selected] = cfg
-            try:
-                self.device.keyboard.analog_set_key_config(self.selected, cfg)
-            except Exception:
-                pass
+            return True
+        if self.selected is not None and self.selected in self._unread_keys:
+            # 本键在加载时没读到，面板上是从占位值改出来的：写进去只会往设备 RAM
+            # 灌一份伪造的锚点/阈值。直接拒答，等重连后重新加载。
+            self._pending_config = None
+            self._flash_status(tr("AnalogTab", "This key could not be read; reconnect to edit it"))
+            return False
+        try:
+            if self.selected is None:
+                # 全局模式：只写固件全局槽(0xFFFF)。跟随全局键由固件 analog_set_global
+                # 级联刷新；这里绝不能逐键补写——0xF2 单键写在固件侧会清 FOLLOW_GLOBAL，
+                # 一次全局调节就会把所有键都标成"已自定义"，全局模式从此失效。
+                ok = self.device.keyboard.analog_set_global_config(self._pending_config)
+            else:
+                cfg = self._pending_config
+                ok = self.device.keyboard.analog_set_key_config(self.selected, cfg)
+                # 只有确认写入成功才更新缓存，否则 GUI 与设备 RAM 会背离
+                if ok:
+                    self.configs[self.selected] = cfg
+        except Exception as e:
+            # 下发失败：设备 RAM 没变，保留 _pending_config 待下次（切键/离开页面）
+            # 重试；绝不能置 _dirty——否则"保存到 EEPROM"会把旧值全量刷一遍并报成功。
+            self._flash_status(tr("AnalogTab", "Write failed: {}").format(e))
+            return False
+        if not ok:
+            # 协议层返回 False = 固件拒绝（如越界/不支持）。保留 pending 待重试，
+            # 且不置 _dirty，避免随后 0xF6 把旧值全量落盘并报成功。
+            self._flash_status(tr("AnalogTab", "Write failed: {}").format(
+                tr("AnalogTab", "rejected by firmware")))
+            return False
         self._pending_config = None
         # 0xF2 只写 RAM——标记"有未保存改动"，由"保存到 EEPROM"按钮提交。
         self._dirty = True
         self._update_save_state()
+        return True
 
     def _flush_pending(self):
-        """把 150ms 防抖窗内未下发的编辑立即同步写进"当前 selected"的 RAM 槽。"""
+        """把 150ms 防抖窗内未下发的编辑立即同步写进"当前 selected"的 RAM 槽。
+
+        返回 True 表示窗口内没有待下发内容，或下发成功。
+        """
         if self._pending_config is not None:
             self._flush_timer.stop()
-            self.flush_config()
+            return self.flush_config()
+        return True
 
     def _update_save_state(self):
         """保存按钮三态：可点(有未保存改动) / 已保存(置灰) / 固件不支持(置灰+说明)。"""
@@ -1140,6 +1254,13 @@ class AnalogTab(BasicEditor):
         if not self._save_supported:
             self.btn_save.setEnabled(False)
             self.btn_save.setToolTip(tr("AnalogTab", "This firmware saves changes automatically"))
+            return
+        if self._unread_keys:
+            # 有键没读到（占位值只在 RAM/GUI 里）：一旦 0xF6 全量提交，占位值会把
+            # 设备上那些键的真实配置覆盖掉。宁可挡住保存。
+            self.btn_save.setEnabled(False)
+            self.btn_save.setToolTip(tr("AnalogTab", "{} key(s) could not be read; reconnect before saving")
+                                     .format(len(self._unread_keys)))
             return
         self.btn_save.setEnabled(self._dirty)
         self.btn_save.setToolTip(
@@ -1155,7 +1276,12 @@ class AnalogTab(BasicEditor):
         """
         if self.device is None or not self._save_supported:
             return
-        self._flush_pending()
+        # 补发防抖窗内的最后一次编辑。若补发失败，绝不能继续 0xF6：
+        # 0xF6 是"把当前 RAM 全量落盘"，那笔编辑根本没进设备 RAM，
+        # 继续提交只会把旧值写进 EEPROM 并报成功——用户以为存上了，实际丢了。
+        if not self._flush_pending():
+            self._flash_status(tr("AnalogTab", "Not saved: last change was not written"))
+            return
         try:
             ok = self.device.keyboard.analog_persist_commit()
         except Exception as e:
@@ -1193,19 +1319,26 @@ class AnalogTab(BasicEditor):
         """轮询整张矩阵按下态：正在按的键渲染成蓝(主题 Highlight)，松开即回普通色。
 
         刻意不调 setOn()：矩阵测试里"按下过"的深蓝 latch 色就是 on 态
-        (Highlight.darker(150))，用户要求按下过=未按下的普通色，故只用 pressed。
+        (Highlight.darker(150))，而按键高亮只应表示"当前正按下"，故只用 pressed。
 
-        通用解锁逻辑：secure 固件下 matrix_poll 受 unlock 门控(via.c:266)，先查
+        通用解锁逻辑：secure 固件下 matrix_poll 受 unlock 门控(via.c 的 unlock 检查)，先查
         get_unlock_status，未解锁则显示 Unlock 按钮并清高亮；本固件 VIAL_INSECURE=yes
         时 get_unlock_status 恒 1，解锁 UI 永不出现、matrix_poll 直接可用。
+
+        解锁态按 1 Hz 查询而不是每轮 50 次：该值在一次连接里几乎不变（本固件恒 1），
+        而这条协议要跑在蓝牙空口上，省下的是实打实的带宽。用户点 Unlock 后由
+        unlock() 主动作废缓存，无需等下一个周期。
         """
         if self.keyboard is None:
             return
-        try:
-            unlocked = self.keyboard.get_unlock_status(3)
-        except (RuntimeError, ValueError):
-            return
-        if not unlocked:
+        now = time.monotonic()
+        if self._unlock_state is None or now - self._unlock_checked >= 1.0:
+            try:
+                self._unlock_state = self.keyboard.get_unlock_status(3)
+            except (RuntimeError, ValueError):
+                return
+            self._unlock_checked = now
+        if not self._unlock_state:
             self._reset_press()
             self.unlock_lbl.show()
             self.unlock_btn.show()
@@ -1272,6 +1405,8 @@ class AnalogTab(BasicEditor):
         """点击 Unlock 按钮：弹 vial 解锁对话框(已解锁则直接返回)。"""
         if self.keyboard is not None:
             Unlocker.unlock(self.keyboard)
+            # 刚解锁完，让下一轮 poll 立刻重查而不是走 1 Hz 缓存
+            self._unlock_state = None
 
     # ------------------------------------------------------------ calibrate
     def _reload_all_configs(self):
@@ -1288,8 +1423,10 @@ class AnalogTab(BasicEditor):
 
     def _flash_status(self, text):
         """操作结果状态行：轮询 poll() 不会覆盖它。
-        旧写法把结果写在 lbl_raw 上，40ms 内就被下一次轮询刷掉，用户根本看不到。"""
+        结果不能写在 lbl_raw 上——那里每 40ms 被轮询刷新一次，用户看不到。
+        显示若干秒后自动清空，免得旧结果一直挂着被误读成当前状态。"""
         self.lbl_status.setText(text)
+        self._status_timer.start()
 
     def do_calibrate(self, mode):
         if self.device is None:
