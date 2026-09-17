@@ -106,6 +106,11 @@ class VirtualKeyboard:
                                     "raw_rest": 375, "raw_full": 675}
         self.analog_readings = {}  # ki -> (travel, raw)，测试注入
         self.analog_cmd_log = []   # (cmd, ki) 记录，断言用；GET_CAPS 不记(无 ki)
+        # 注入读失败：列进来的 ki 在 0xF1 时抛错，用于覆盖"批量读有键没读到时
+        # 不得静默用占位值顶替、更不得落盘"的路径。
+        self.analog_fail_keys = set()
+        # 0xF0 请求计数（GET_CAPS 没有 ki，不进 cmd_log，单独记）
+        self.analog_caps_count = 0
 
     def get_keymap_buffer(self):
         output = b""
@@ -199,6 +204,7 @@ class VirtualKeyboard:
         cmd = msg[1]
         if cmd == CMD_VIAL_ANALOG_GET_CAPS:
             num = self.rows * self.cols
+            self.analog_caps_count += 1
             # 布局按协议文档：msg[0]=ver, msg[1..2]=num_keys(LE16), msg[3]=axis,
             # msg[4]=caps, msg[5]=max_readings, msg[6]=config_size,
             # msg[7]=触底校准开关状态, msg[8..9]=满量程(LE16)
@@ -211,6 +217,8 @@ class VirtualKeyboard:
         ki = struct.unpack_from("<H", msg, ki_off)[0]
         self.analog_cmd_log.append((cmd, ki))
         if cmd == CMD_VIAL_ANALOG_GET_KEY_CONFIG:
+            if ki in self.analog_fail_keys:
+                raise RuntimeError("simulated analog read failure for ki=%d" % ki)
             return self._analog_cfg_bytes(ki)
         elif cmd == CMD_VIAL_ANALOG_SET_KEY_CONFIG:
             (act, rel, rtd, rtu, flags, _res,
@@ -773,6 +781,8 @@ def test_analog_tab(qtbot):
     # 窄域(默认满量程 255)：12 字节配置、每包最多 10 条读数
     assert tab.caps["max_travel"] == 255 and tab.max_travel == 255
     assert tab.caps["config_size"] == 12 and tab.caps["max_readings"] == 10
+    # caps 自洽性：msg[6] 必须等于满量程推导出的宽度，否则整个标签页不该接管
+    assert tab.caps["config_bytes_ok"]
 
     # 未选键 → 全局模式：手柄显示固件全局槽的值；行程与三个读数是无意义占位
     assert tab.selected is None
@@ -871,6 +881,41 @@ def test_analog_tab(qtbot):
     assert tab.track.actuation == 200
 
 
+def test_analog_protocol_version_pinned():
+    """协议版本号钉死：bump 必须是有意的，且要同步固件 + 协议文档版本史表。
+
+    两仓库之间没有自动化交叉校验（靠约定），所以至少让"改了但忘同步"在 GUI 侧
+    留下一处可见的红色，而不是静默通过。真源：vial-qmk-stg/quantum/vial.c 的
+    VIAL_ANALOG_PROTOCOL_VERSION。
+    """
+    from protocol.constants import ANALOG_PROTOCOL_VERSION
+    assert ANALOG_PROTOCOL_VERSION == 1, (
+        "协议版本号变了：请同步 vial-qmk-stg/quantum/vial.c 的 "
+        "VIAL_ANALOG_PROTOCOL_VERSION 与 docs/vial-analog-protocol.md §2 的版本史表，"
+        "然后更新本断言。")
+
+
+def test_analog_track_scale_adapts(qtbot):
+    """进度控件列2 的宽度随满量程位数自适应，且窄域下不改变原有像素栅格。"""
+    mw, vk = prepare(qtbot, FAKE_KEYBOARD)
+    tab = mw.analog_tab
+    track = tab.track
+
+    # 窄域(255)：维持原始栅格，不因自适应而漂移
+    track.set_max_travel(255)
+    assert track._TRACK_X == 92 and track._LABEL_X == 114, (track._TRACK_X, track._LABEL_X)
+    assert track._scale_w == track._SCALE_W_MIN
+
+    # 宽域：满量程数字位数超过窄域时，列2 必须跟着变大、整体右移让位。
+    # 用 13 位超大值确保列宽必然越过 _SCALE_W_MIN（与具体字体无关，可复现）。
+    track.set_max_travel(10**12)
+    assert track._scale_w > track._SCALE_W_MIN, track._scale_w
+    assert track._TRACK_X > 92, track._TRACK_X
+    assert track._LABEL_X == track._TRACK_X + 22
+    # 列宽与轨道中心保持原设计的 2px 间隙（列右缘恰好落在轨道中心线左侧 2px）
+    assert track._TRACK_X == track._SCALE_X + track._scale_w + 2
+
+
 def test_analog_wide_travel(qtbot):
     """满量程 >255：行程域升为 uint16，GUI 必须全程按 caps 自适应，不得写死 255/12 字节。"""
     mw, vk = prepare(qtbot, FAKE_KEYBOARD)
@@ -882,6 +927,7 @@ def test_analog_wide_travel(qtbot):
     tab.rebuild(tab.device)
     assert tab.caps["max_travel"] == 4096
     assert tab.caps["config_size"] == 16 and tab.caps["max_readings"] == 7
+    assert tab.caps["config_bytes_ok"]
     # 满量程铺到行程轨道、RT 滑块量程与末端刻度
     assert tab.max_travel == 4096 and tab.track.max_travel == 4096
     for s in tab.rt_sliders.values():
@@ -973,3 +1019,83 @@ def test_analog_vil_export_import(qtbot):
     before = dict(vk.analog_global)
     mw.keymap_editor.restore_layout(json.dumps(bad).encode("utf-8"))
     assert vk.analog_global == before
+
+
+def test_analog_key_index_guard(qtbot):
+    """越界 ki 必须在 GUI 侧挡掉：固件对越界的错误码(msg[0]=1)与正常响应不可区分。"""
+    import pytest
+    mw, vk = prepare(qtbot, FAKE_KEYBOARD)
+    kb = mw.analog_tab.device.keyboard
+    num_keys = mw.analog_tab.caps["num_keys"]
+
+    with pytest.raises(ValueError):
+        kb.analog_get_key_config(num_keys)
+    with pytest.raises(ValueError):
+        kb.analog_get_key_config(0x1234)
+
+    # 越界请求不该真的发出去
+    vk.analog_cmd_log.clear()
+    with pytest.raises(ValueError):
+        kb.analog_get_key_config(num_keys + 7)
+    assert vk.analog_cmd_log == []
+
+    # 合法索引与全局槽(0xFFFF)照常
+    assert kb.analog_get_key_config(0) is not None
+    assert kb.analog_get_key_config(0xFFFF) is not None
+
+
+def test_analog_caps_cached(qtbot):
+    """caps 是编译期常量：同一连接内重复取应命中缓存，不再发 0xF0。"""
+    mw, vk = prepare(qtbot, FAKE_KEYBOARD)
+    kb = mw.analog_tab.device.keyboard
+    base = vk.analog_caps_count  # 启动握手已查过一次
+
+    first = kb.analog_caps()
+    assert kb.analog_caps() is first  # 同一份对象，未重新查询
+    assert vk.analog_caps_count == base
+    assert kb.analog_caps(refresh=True) is not first  # 显式刷新才重查
+    assert vk.analog_caps_count == base + 1
+
+    # .vil 保存/恢复走缓存，不额外发 0xF0
+    before = vk.analog_caps_count
+    mw.keymap_editor.save_layout()
+    mw.keymap_editor.restore_layout(mw.keymap_editor.save_layout())
+    assert vk.analog_caps_count == before
+
+
+def test_analog_unread_keys_block_save(qtbot):
+    """批量读有键失败时：占位值不得被当成真值落盘，该键也不得接受编辑。"""
+    mw, vk = prepare(qtbot, FAKE_KEYBOARD)
+    tab = mw.analog_tab
+    # 键 1 读不到（模拟掉线/固件不响应）
+    vk.analog_fail_keys.add(1)
+
+    tab._all_configs_loaded = False
+    tab.configs = {}
+    tab._load_all_configs()
+
+    assert tab._unread_keys == {1}
+    assert 1 in tab.configs  # UI 需要该索引存在，仍占位
+    # 状态行给出明确提示，且保存被拦住（否则 0xF6 会把占位值写进 EEPROM）
+    assert "1" in tab.lbl_status.text()
+    tab._dirty = True
+    tab._update_save_state()
+    assert not tab.btn_save.isEnabled()
+
+    # 该键的编辑不写进设备 RAM：拒绝下发并清掉待发配置
+    tab.selected = 1
+    tab._pending_config = tab.configs[1]
+    vk.analog_cmd_log.clear()
+    tab.flush_config()
+    assert vk.analog_cmd_log == []
+    assert tab._pending_config is None
+
+    # 重连（重新加载且不再失败）后恢复可保存
+    vk.analog_fail_keys.clear()
+    tab._all_configs_loaded = False
+    tab.configs = {}
+    tab._load_all_configs()
+    assert tab._unread_keys == set()
+    tab._dirty = True
+    tab._update_save_state()
+    assert tab.btn_save.isEnabled()

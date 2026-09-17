@@ -10,7 +10,8 @@
 （16 字节 / 4 字节）——调用方只需拿 caps 里的值，不必自己判断宽度。
 
 用法：先 analog_get_caps()（它会缓存满量程），后续所有读写自动按该宽度收发。
-"""
+需要重复取 caps（如 .vil 保存/恢复）时走 analog_caps()，它带实例级缓存，不会每次
+都花一次 HID 事务。"""
 
 import struct
 
@@ -18,7 +19,8 @@ from protocol.constants import (
     CMD_VIA_VIAL_PREFIX, CMD_VIAL_ANALOG_GET_CAPS, CMD_VIAL_ANALOG_GET_KEY_CONFIG,
     CMD_VIAL_ANALOG_SET_KEY_CONFIG, CMD_VIAL_ANALOG_GET_KEY_READINGS,
     CMD_VIAL_ANALOG_CALIBRATE, CMD_VIAL_ANALOG_RESET_KEY, CMD_VIAL_ANALOG_PERSIST_COMMIT,
-    ANALOG_FLAG_ACTUATION_OVERRIDE, ANALOG_TRAVEL_NARROW_MAX,
+    ANALOG_FLAG_ACTUATION_OVERRIDE, ANALOG_FLAG_RT_ENABLED,
+    ANALOG_TRAVEL_NARROW_MAX, ANALOG_PROTOCOL_VERSION,
 )
 
 # 默认满量程：尚未握手（未读到 caps）时的保守值，与固件默认 ANALOG_MAX_TRAVEL 一致。
@@ -27,8 +29,27 @@ ANALOG_DEFAULT_MAX_TRAVEL = 255
 # 每键配置的两种线格式，字段顺序见固件 vial_analog_wire_config_t：
 #   4 项行程域阈值(触发/断开/RT 触发距离/RT 释放距离) + flags + reserved
 #   + raw_rest/raw_full(原始 ADC 域锚点) + reserved2
+_ANALOG_CONFIG_BYTES_NARROW = 12
+_ANALOG_CONFIG_BYTES_WIDE = 16
+
 _CONFIG_FMT_NARROW = "<BBBBBBHHH"
 _CONFIG_FMT_WIDE = "<HHHHBBHHH"
+
+# 线格式字节数 -> struct 格式串。0xF0 caps 的 msg[6] 声明的就是这个字节数；
+# 固件侧尺寸由静态断言绑死在同一组取值上，出现别的值即视为不支持本协议。
+_CONFIG_FMT_BY_BYTES = {
+    _ANALOG_CONFIG_BYTES_NARROW: _CONFIG_FMT_NARROW,
+    _ANALOG_CONFIG_BYTES_WIDE: _CONFIG_FMT_WIDE,
+}
+
+
+def analog_config_bytes(max_travel):
+    """caps 里应出现的每键配置字节数：12（uint8 行程域）/ 16（uint16 行程域）。
+
+    这个值是 caps.msg[6] 的期望取值，用于校验固件声明。
+    仅按满量程推导；线格式的最终尺寸由 analog_config_size() 从实际 fmt 算出。
+    """
+    return _ANALOG_CONFIG_BYTES_WIDE if analog_travel_is_wide(max_travel) else _ANALOG_CONFIG_BYTES_NARROW
 
 
 def analog_travel_is_wide(max_travel):
@@ -83,7 +104,7 @@ class AnalogKeyConfig:
                            self.raw_rest, self.raw_full, 0)
 
     def is_rt_enabled(self):
-        return bool(self.flags & (1 << 0))
+        return bool(self.flags & ANALOG_FLAG_RT_ENABLED)
 
     def is_customized(self):
         """本键是否已单独调节（ACTUATION_OVERRIDE 标志位）。
@@ -105,6 +126,24 @@ class ProtocolAnalog:
         """当前设备的行程域满量程。未握手时按默认 255（窄格式）。"""
         return getattr(self, "_analog_max_travel", ANALOG_DEFAULT_MAX_TRAVEL)
 
+    def analog_caps(self, refresh=False):
+        """取 caps，并在实例上缓存。
+
+        caps 除 msg[7]（触底校准开关，运行态）外全是编译期常量
+        （见协议文档 §1.2），一次连接内不会变；而 `.vil` 保存/恢复这类
+        路径会反复问它。缓存后非 analog 固件不再每次保存都被白问一遍
+        `0xF0`，也没有了"同一会话里两次 caps 结果不同"的窗口。
+        refresh=True 供需要重读的场景：目前调用方是 AnalogTab 重握手
+        (editor/analog_tab.py 的 analog_caps(refresh=True))——设备可能已更换，
+        caps 里的 msg[7] 又是运行态，不能沿用旧缓存。
+        """
+        cached = getattr(self, "_analog_caps", None)
+        if cached is not None and not refresh:
+            return cached
+        caps = self.analog_get_caps()
+        self._analog_caps = caps
+        return caps
+
     def analog_get_caps(self):
         data = self.usb_send(self.dev, struct.pack("BB", CMD_VIA_VIAL_PREFIX, CMD_VIAL_ANALOG_GET_CAPS),
                              retries=20)
@@ -124,12 +163,28 @@ class ProtocolAnalog:
         # 都按 0 走（0 会让行程域宽度判断与各种比例换算全部失去意义）。
         if not caps["max_travel"]:
             caps["max_travel"] = ANALOG_DEFAULT_MAX_TRAVEL
+        # 固件在 caps.msg[6] 里声明的配置字节数必须与满量程推导出的宽度自洽。
+        # 二者由固件同一条判据推出、并由静态断言绑死；一旦不一致，后续按错误
+        # 偏移解析整条配置都是错的——宁可在这里就认定"不支持"。
+        caps["config_bytes_ok"] = (caps["config_size"] == analog_config_bytes(caps["max_travel"]))
         self._analog_max_travel = caps["max_travel"]
+        self._analog_num_keys = caps["num_keys"]
         return caps
 
-    def analog_get_key_config(self, ki):
+    def analog_get_key_config(self, ki, retries=20):
+        """读单键配置。批量遍历（如 _load_all_configs 的 0xF1 × num_keys）应显式
+        传小 retries：默认的 20 次重试是给单次交互用的，叠加到几十上百次批量读上，
+        设备掉线时会把 GUI 线程阻塞到看起来像卡死。
+
+        越界 ki 在协议里没有可靠错误码：固件对越界返回 msg[0]=1，而已解锁的正常
+        响应 msg[0] 也可能是 1（= 触发行程 1），无法区分（协议文档 §0xF1 已声明）。
+        故这里主动挡掉，不把请求发出去靠回包猜。
+        """
+        num_keys = getattr(self, "_analog_num_keys", 0)
+        if ki != 0xFFFF and num_keys and ki >= num_keys:
+            raise ValueError("analog key index %d out of range (num_keys=%d)" % (ki, num_keys))
         data = self.usb_send(self.dev, struct.pack("<BBH", CMD_VIA_VIAL_PREFIX, CMD_VIAL_ANALOG_GET_KEY_CONFIG, ki),
-                             retries=20)
+                             retries=retries)
         return AnalogKeyConfig.from_bytes(data, self.analog_max_travel())
 
     def analog_set_key_config(self, ki, cfg):
