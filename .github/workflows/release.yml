@@ -80,19 +80,43 @@ jobs:
       working-directory: vial-gui
       shell: pwsh
       run: |
-        # PyQt5 5.9.2 捆绑的 Qt5 依赖 msvcr110.dll(VC++ 2012)，runner 不自带；
-        # 缺它 fbs freeze 会在收集 Qt 插件时报 FileNotFoundError。
+        # fbs 0.9.0 的 freeze/windows.py::_add_missing_dlls() 会依次要求这 7 个 DLL
+        # 都能在 **PATH** 上找到（_find_on_path 遍历 PATH，不是只查 System32）：
+        #     msvcr100.dll                                      <- VC++ 2010
+        #     msvcr110.dll  msvcp110.dll                        <- VC++ 2012
+        #     vcruntime140.dll msvcp140.dll concrt140.dll vccorlib140.dll  <- VC++ 2015+
+        # 少任何一个都抛 FileNotFoundError，而它的文案**固定**写「请安装 VS 2012」，
+        # 与实际缺哪套无关 —— 现场缺的其实是 msvcr100(2010)，照文案去装 2012 会白忙。
+        # 所以这里按 DLL 逐个判定，缺哪套装哪套。
         #
-        # download.microsoft.com 对已失效的 /download/<GUID>/ 路径**返回 200 +
-        # HTML 错误页**（不是 404），Invoke-WebRequest 不会抛错，于是 HTML 被存成
-        # .exe，Start-Process 才报 "not a valid application for this OS platform"。
-        # 所以这里每步都先校验下载结果是真正的 PE 文件(MZ 头)再执行。
+        # 装法优先用 Chocolatey：GitHub 的 Windows 镜像自带 choco，包名长期维护，
+        # 不必去猜 download.microsoft.com 的 /download/<GUID>/ 直链 —— 那种链接一旦
+        # 失效会**返回 200 + HTML 错误页**（不是 404），Invoke-WebRequest 不报错，
+        # HTML 被存成 .exe，直到 Start-Process 才炸（本步骤历史上正是这么挂的）。
+        # 因此凡走直链的地方都先校验 PE 的 MZ 头，且把 choco 作为首选途径。
         $ErrorActionPreference = 'Stop'
 
-        function Get-Redistributable {
+        # 与 fbs 的 _find_on_path 同语义：逐段查 PATH。
+        function Find-OnPath {
+          param([string]$Name)
+          foreach ($d in ($env:PATH -split [IO.Path]::PathSeparator)) {
+            if ([string]::IsNullOrWhiteSpace($d)) { continue }
+            $p = Join-Path $d $Name
+            if (Test-Path -LiteralPath $p) { return $p }
+          }
+          return $null
+        }
+
+        $required = @(
+          'msvcr100.dll',
+          'msvcr110.dll', 'msvcp110.dll',
+          'vcruntime140.dll', 'msvcp140.dll', 'concrt140.dll', 'vccorlib140.dll'
+        )
+
+        function Get-PeFile {
           param([string]$Name, [string]$Uri)
           $exe = Join-Path $env:TEMP "$Name.exe"
-          Write-Host "downloading $Name from $Uri"
+          Write-Host "  downloading $Name"
           Invoke-WebRequest -Uri $Uri -OutFile $exe -UseBasicParsing
           $fs = [System.IO.File]::OpenRead($exe)
           try {
@@ -100,58 +124,88 @@ jobs:
             $null = $fs.Read($sig, 0, 2)
           } finally { $fs.Dispose() }
           if ($sig[0] -ne 0x4D -or $sig[1] -ne 0x5A) {
-            throw "$Name is not a PE executable (no MZ header, $( (Get-Item $exe).Length ) bytes). " +
-                  "The download URL is most likely dead -- download.microsoft.com serves an HTML " +
-                  "error page with HTTP 200 for retired /download/<GUID>/ paths."
+            throw "$Name is not a PE executable (no MZ header, $( (Get-Item $exe).Length ) bytes) " +
+                  "-- the URL is dead; download.microsoft.com serves an HTML error page with " +
+                  "HTTP 200 for retired /download/<GUID>/ paths."
           }
-          Write-Host "$Name ok ($( (Get-Item $exe).Length ) bytes)"
           return $exe
         }
 
-        $redists = @(
-          # VC++ 2012 Update 4。注意路径里**不能**带 VSU_4 之类的目录段：
-          # download.microsoft.com 只认 /download/<GUID>/vcredist_<arch>.exe，
-          # 多一段就会拿到 HTML 错误页(HTTP 200)，正是本次失败的成因。
-          @{ n = 'vcredist_2012_x86'; u = 'https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/vcredist_x86.exe' },
-          @{ n = 'vcredist_2012_x64'; u = 'https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/vcredist_x64.exe' }
-        )
-
-        # 先看是否已经装好。windows-2025 镜像近年来已逐步预装 VC++ 2012 运行库，
-        # 若命中就完全不必下载——这既省一次网络往返，也让构建不再依赖一个
-        # 随时可能下线的微软直链（该链接已因路径写法问题失效过一次）。
-        function Test-Msvcr110 {
-          return (Test-Path "$env:SystemRoot\System32\msvcr110.dll") -or
-                 (Test-Path "$env:SystemRoot\SysWOW64\msvcr110.dll")
+        function Install-ViaChoco {
+          param([string]$Package)
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) { return $false }
+          Write-Host "  choco install $Package"
+          choco install $Package -y --no-progress --limit-output | Out-Host
+          # choco 在部分包里返回非 0 但实际已装好，故由调用方的 DLL 复查决定成败。
+          return $true
         }
 
-        if (Test-Msvcr110) {
-          Write-Host 'msvcr110.dll already present on the runner; skipping download'
-        } else {
-          $failures = @()
-          foreach ($r in $redists) {
+        # 每套运行库：先 choco（包名稳定），失败再退回官方直链。
+        $suites = @(
+          @{ name  = 'VC++ 2010 (msvcr100)'
+             needs = @('msvcr100.dll')
+             choco = 'vcredist2010'
+             urls  = @(
+               # 只用 aka.ms 短链；VS2010 无短链，故该套依赖 choco。
+             ) }
+          @{ name  = 'VC++ 2012 (msvcr110/msvcp110)'
+             needs = @('msvcr110.dll', 'msvcp110.dll')
+             choco = 'vcredist2012'
+             urls  = @(
+               @{ n = 'vcredist_2012_x86'; u = 'https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/vcredist_x86.exe' },
+               @{ n = 'vcredist_2012_x64'; u = 'https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/vcredist_x64.exe' }
+             ) }
+          @{ name  = 'VC++ 2015-2022 (vcruntime140 系列)'
+             needs = @('vcruntime140.dll', 'msvcp140.dll', 'concrt140.dll', 'vccorlib140.dll')
+             choco = 'vcredist140'
+             urls  = @(
+               @{ n = 'vc_redist_x64'; u = 'https://aka.ms/vs/17/release/vc_redist.x64.exe' },
+               @{ n = 'vc_redist_x86'; u = 'https://aka.ms/vs/17/release/vc_redist.x86.exe' }
+             ) }
+        )
+
+        $notes = @()
+        foreach ($s in $suites) {
+          $missing = @($s.needs | Where-Object { -not (Find-OnPath $_) })
+          if (-not $missing) {
+            Write-Host "$($s.name): already on PATH"
+            continue
+          }
+          Write-Host "$($s.name): missing $($missing -join ', ')"
+
+          $ok = $false
+          try { $ok = Install-ViaChoco -Package $s.choco } catch { $notes += "$($s.choco) (choco): $($_.Exception.Message)" }
+          if ($ok -and -not @($s.needs | Where-Object { -not (Find-OnPath $_) })) {
+            Write-Host "  -> satisfied via choco"
+            continue
+          }
+
+          foreach ($r in $s.urls) {
             try {
-              $exe = Get-Redistributable -Name $r.n -Uri $r.u
+              $exe = Get-PeFile -Name $r.n -Uri $r.u
               Start-Process -FilePath $exe -ArgumentList '/install', '/quiet', '/norestart' -Wait
               Remove-Item $exe -Force
             } catch {
-              $failures += "$($r.n): $($_.Exception.Message)"
+              $notes += "$($r.n): $($_.Exception.Message)"
+              Write-Host "  ! $($r.n): $($_.Exception.Message)"
             }
+            if (-not @($s.needs | Where-Object { -not (Find-OnPath $_) })) { break }
           }
-          if (-not (Test-Msvcr110)) {
-            Write-Host '::error::VC++ 2012 runtime (msvcr110.dll) is not available.'
-            $failures | ForEach-Object { Write-Host "  - $_" }
-            # 不用 here-string：本脚本嵌在 YAML 块标量里，每行都带缩进，
-            # 而 here-string 的结束符必须顶格，会被缩进破坏。
-            $hint = 'fbs freeze needs msvcr110.dll (PyQt5 5.9.2 Qt5 links against it) ' +
-                    'and the runner does not have it. Options, in order of preference: ' +
-                    '(1) install VC++ 2012 x86+x64 on the runner image; ' +
-                    '(2) vendor msvcr110.dll next to the frozen binaries and ship it; ' +
-                    '(3) move off PyQt5 5.9.2, whose Qt5 is the only reason this old runtime is needed. ' +
-                    'Do not relax this check -- the freeze will fail later and less clearly.'
-            throw $hint
-          }
-          Write-Host 'VC++ 2012 runtime installed'
         }
+
+        # 提前把缺口暴露出来，别等 fbs 用一句指向 VS2012 的误导文案报错。
+        $still = @($required | Where-Object { -not (Find-OnPath $_) })
+        if ($still) {
+          Write-Host ('::error::missing on PATH: ' + ($still -join ', '))
+          $notes | ForEach-Object { Write-Host "  - $_" }
+          # 不用 here-string：本脚本嵌在 YAML 块标量里、每行都带缩进，
+          # 而 here-string 结束符必须顶格，会被缩进破坏。
+          throw ('fbs freeze will fail; these DLLs are not on PATH: ' + ($still -join ', ') +
+                 '. fbs names VS 2012 in its message regardless of which suite is actually ' +
+                 'missing. Install the matching redistributable, or vendor the DLL into the ' +
+                 'freeze dir.')
+        }
+        Write-Host 'all Visual C++ runtimes required by fbs are available on PATH'
 
     - name: fbs freeze
       working-directory: vial-gui
