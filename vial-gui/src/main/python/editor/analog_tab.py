@@ -621,11 +621,6 @@ class AnalogTab(BasicEditor):
         self._flush_timer.timeout.connect(self.flush_config)
         self._pending_config = None
 
-        # 键面文字重绘的合并定时器（拖动滑块时避免整张键盘每像素重刷）
-        self._keys_text_timer = QTimer()
-        self._keys_text_timer.setSingleShot(True)
-        self._keys_text_timer.timeout.connect(self._on_keys_text_timer)
-
         self._build_ui()
         layout_editor.changed.connect(self.on_layout_changed)
 
@@ -1180,21 +1175,8 @@ class AnalogTab(BasicEditor):
             # 拖动即"转自定义"：跟随全局复选框同步取消勾选（信号已屏蔽，不会递归）
             if self.chk_follow.isChecked():
                 self._untoggle(self.chk_follow, False)
-        self._schedule_keys_text_update()
-        self._flush_timer.start()
-
-    def _schedule_keys_text_update(self):
-        """合并高频重绘：拖动滑块时每次像素变化都重刷整张键盘会很卡。
-
-        缓存更新(pending/configs)必须立刻做，但"刷新所有键面文字 + 重绘"这类
-        纯显示动作可以合并——用一个 0 延时的单发定时器，在一轮事件循环内只做一次。
-        """
-        if not self._keys_text_timer.isActive():
-            self._keys_text_timer.start(0)
-
-    def _on_keys_text_timer(self):
-        self._keys_text_timer.stop()
         self._update_all_keys_text()
+        self._flush_timer.start()
 
     def flush_config(self):
         """把 _pending_config 下发到设备。返回 True 表示已成功写入（或无需写入）。"""
