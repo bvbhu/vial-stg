@@ -91,7 +91,19 @@ def _detect():
 
 
 def translate(context, source, *args, **kwargs):
-    """签名与 QCoreApplication.translate(context, text, disambiguation, n) 兼容。"""
+    """签名与 QCoreApplication.translate(context, text, disambiguation, n) 兼容。
+
+    注意：与 Qt 原版**不等价**。Qt 会用 disambiguation 区分同文案不同语义的条目，
+    并支持 %n 复数形式（按 n 选单/复数译文）；本实现两者都不做，多余参数直接丢弃。
+    目前工程里没有用到这两项，但新增调用时若传了参数，会在这里留一条 warning——
+    否则它会静默失效（译文照出，复数/消歧没生效），很难查。
+    """
+    if (args or kwargs) and source:
+        logging.warning(
+            "i18n: translate(%r, %r) 收到 Qt 专有参数 args=%r kwargs=%r，本实现会忽略它们"
+            "（disambiguation 与 %%n 复数未支持）",
+            context, source, args, kwargs,
+        )
     if not isinstance(source, str) or not source:
         return source
     if get_language() != ZH:

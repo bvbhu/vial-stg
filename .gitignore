@@ -4,3 +4,6 @@ deps
 src/build
 via-keymap-precompiled
 vial-gui/*.vil
+__pycache__/
+*.pyc
+.pytest_cache/

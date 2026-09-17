@@ -33,7 +33,8 @@ class AlternativeDisplay(QWidget):
             for title, code in prefix_buttons:
                 btn = SquareButton()
                 btn.setRelSize(KEYCODE_BTN_RATIO)
-                # 只翻译显示文字；信号里仍发原始 code，否则 "Any" 的分支判断会失效
+                # 只翻译显示文字；信号里仍发原始 code，否则 "Any" 的分支判断会失效。
+                # "Any" 故意不进 i18n_zh：用户要求键码保持英文原文
                 btn.setText(tr("KeycodePanel", title))
                 btn.clicked.connect(lambda st, k=code: self.keycode_changed.emit(title))
                 self.key_layout.addWidget(btn)
