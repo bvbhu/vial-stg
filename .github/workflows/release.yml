@@ -78,19 +78,80 @@ jobs:
 
     - name: Install Visual C++ Redistributable
       working-directory: vial-gui
+      shell: pwsh
       run: |
-        # VC++ 2012 Update 4：老版 PyQt5 捆绑的 Qt5 依赖 msvcr110.dll，
-        # windows runner 不自带，缺它 fbs freeze 直接 FileNotFoundError
-        $u = "https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU_4"
-        foreach ($arch in @("x86","x64")) {
-          Invoke-WebRequest -Uri "$u/vcredist_$arch.exe" -OutFile "vcredist_$arch.exe"
-          Start-Process -FilePath "vcredist_$arch.exe" -ArgumentList "/install", "/quiet", "/norestart" -Wait
-          Remove-Item "vcredist_$arch.exe"
+        # PyQt5 5.9.2 捆绑的 Qt5 依赖 msvcr110.dll(VC++ 2012)，runner 不自带；
+        # 缺它 fbs freeze 会在收集 Qt 插件时报 FileNotFoundError。
+        #
+        # download.microsoft.com 对已失效的 /download/<GUID>/ 路径**返回 200 +
+        # HTML 错误页**（不是 404），Invoke-WebRequest 不会抛错，于是 HTML 被存成
+        # .exe，Start-Process 才报 "not a valid application for this OS platform"。
+        # 所以这里每步都先校验下载结果是真正的 PE 文件(MZ 头)再执行。
+        $ErrorActionPreference = 'Stop'
+
+        function Get-Redistributable {
+          param([string]$Name, [string]$Uri)
+          $exe = Join-Path $env:TEMP "$Name.exe"
+          Write-Host "downloading $Name from $Uri"
+          Invoke-WebRequest -Uri $Uri -OutFile $exe -UseBasicParsing
+          $fs = [System.IO.File]::OpenRead($exe)
+          try {
+            $sig = New-Object byte[] 2
+            $null = $fs.Read($sig, 0, 2)
+          } finally { $fs.Dispose() }
+          if ($sig[0] -ne 0x4D -or $sig[1] -ne 0x5A) {
+            throw "$Name is not a PE executable (no MZ header, $( (Get-Item $exe).Length ) bytes). " +
+                  "The download URL is most likely dead -- download.microsoft.com serves an HTML " +
+                  "error page with HTTP 200 for retired /download/<GUID>/ paths."
+          }
+          Write-Host "$Name ok ($( (Get-Item $exe).Length ) bytes)"
+          return $exe
         }
-        # VC++ 2015-2022：兜底，个别依赖 vcruntime140.dll
-        Invoke-WebRequest -Uri "https://download.microsoft.com/download/3/2/2/3224B87F-CFA0-4E70-BDA3-3DE650EFEBA5/vcredist_x64.exe" -OutFile "vcredist_2015_x64.exe"
-        Start-Process -FilePath "vcredist_2015_x64.exe" -ArgumentList "/install", "/quiet", "/norestart" -Wait
-        Remove-Item "vcredist_2015_x64.exe"
+
+        $redists = @(
+          # VC++ 2012 Update 4。注意路径里**不能**带 VSU_4 之类的目录段：
+          # download.microsoft.com 只认 /download/<GUID>/vcredist_<arch>.exe，
+          # 多一段就会拿到 HTML 错误页(HTTP 200)，正是本次失败的成因。
+          @{ n = 'vcredist_2012_x86'; u = 'https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/vcredist_x86.exe' },
+          @{ n = 'vcredist_2012_x64'; u = 'https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/vcredist_x64.exe' }
+        )
+
+        # 先看是否已经装好。windows-2025 镜像近年来已逐步预装 VC++ 2012 运行库，
+        # 若命中就完全不必下载——这既省一次网络往返，也让构建不再依赖一个
+        # 随时可能下线的微软直链（该链接已因路径写法问题失效过一次）。
+        function Test-Msvcr110 {
+          return (Test-Path "$env:SystemRoot\System32\msvcr110.dll") -or
+                 (Test-Path "$env:SystemRoot\SysWOW64\msvcr110.dll")
+        }
+
+        if (Test-Msvcr110) {
+          Write-Host 'msvcr110.dll already present on the runner; skipping download'
+        } else {
+          $failures = @()
+          foreach ($r in $redists) {
+            try {
+              $exe = Get-Redistributable -Name $r.n -Uri $r.u
+              Start-Process -FilePath $exe -ArgumentList '/install', '/quiet', '/norestart' -Wait
+              Remove-Item $exe -Force
+            } catch {
+              $failures += "$($r.n): $($_.Exception.Message)"
+            }
+          }
+          if (-not (Test-Msvcr110)) {
+            Write-Host '::error::VC++ 2012 runtime (msvcr110.dll) is not available.'
+            $failures | ForEach-Object { Write-Host "  - $_" }
+            # 不用 here-string：本脚本嵌在 YAML 块标量里，每行都带缩进，
+            # 而 here-string 的结束符必须顶格，会被缩进破坏。
+            $hint = 'fbs freeze needs msvcr110.dll (PyQt5 5.9.2 Qt5 links against it) ' +
+                    'and the runner does not have it. Options, in order of preference: ' +
+                    '(1) install VC++ 2012 x86+x64 on the runner image; ' +
+                    '(2) vendor msvcr110.dll next to the frozen binaries and ship it; ' +
+                    '(3) move off PyQt5 5.9.2, whose Qt5 is the only reason this old runtime is needed. ' +
+                    'Do not relax this check -- the freeze will fail later and less clearly.'
+            throw $hint
+          }
+          Write-Host 'VC++ 2012 runtime installed'
+        }
 
     - name: fbs freeze
       working-directory: vial-gui
