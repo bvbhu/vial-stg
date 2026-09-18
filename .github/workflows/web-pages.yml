@@ -40,7 +40,33 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+    # lfs: true 是**必须**的：src/fonts/ 下两个字体走 Git LFS，但 LFS 对象不在
+    # 仓库里，actions/checkout 默认不拉。漏掉这个开关时 checkout 出来的是
+    # 131/132 字节的 LFS 指针文本，build.sh 照样把它们 preload 进 /usr/local/fonts/，
+    # addApplicationFont 拿到的是纯文本 → 注册静默失败 → 整个界面（含 CJK）无字体、
+    # 渲染成方框。失败是静默的：构建成功、页面正常、只有字没了。
+    # 见 README「字体与 Git LFS」。
     - uses: actions/checkout@v4
+      with:
+        lfs: true
+
+    # 显式校验：字体若仍是指针就当场失败，别再把「无字体的包」部署上线。
+    # 这套静默失败的排查成本远高于这里一行。
+    - name: Verify fonts are real binaries (not Git LFS pointers)
+      run: |
+        set -e
+        for f in src/fonts/Inter-Regular.ttf src/fonts/NotoSansSC-Regular.otf; do
+          size=$(stat -c%s "$f")
+          if head -c 40 "$f" | grep -q 'git-lfs.github.com/spec'; then
+            echo "::error file=$f::$f 是 Git LFS 指针（$size 字节），不是真字体。checkout 需要 lfs: true。"
+            exit 1
+          fi
+          if [ "$size" -lt 100000 ]; then
+            echo "::error file=$f::$f 只有 $size 字节，明显不是真字体（Inter≈342680，Noto≈8331336）。"
+            exit 1
+          fi
+          echo "OK $f ($size bytes)"
+        done
 
     # ---------------------------------------------------------------------------
     # 三段缓存。全命中时只有 src/build.sh 真正跑（几分钟）；全 miss 是完整冷构建。
