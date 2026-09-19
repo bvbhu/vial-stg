@@ -180,7 +180,7 @@ class FilteredTabbedKeycodes(QTabWidget):
                                   (mods_narrow, (KEYCODES_BOOT + KEYCODES_QUANTUM)),
                                   (None, (KEYCODES_BOOT + KEYCODES_MODIFIERS + KEYCODES_QUANTUM))]),
             SimpleTab(self, "Backlight", KEYCODES_BACKLIGHT),
-            SimpleTab(self, "Bluetooth/Wireless", KEYCODES_BLUETOOTH),
+            SimpleTab(self, "Wireless", KEYCODES_BLUETOOTH),
             SimpleTab(self, "App, Media and Mouse", KEYCODES_MEDIA),
             SimpleTab(self, "MIDI", KEYCODES_MIDI),
             SimpleTab(self, "Tap Dance", KEYCODES_TAP_DANCE),

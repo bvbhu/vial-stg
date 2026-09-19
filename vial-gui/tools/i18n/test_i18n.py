@@ -94,7 +94,7 @@ PROBES = {
                          "Tapping this number of times"),
     "qmk_mouse":        ("滚轮移动间隔（毫秒）", "Time between wheel movements"),
     "qmk_reset":        ("确定要把所有设置恢复为默认值吗？", "Reset all settings to default values?"),
-    "kcpanel_bluetooth": ("蓝牙/无线", "Bluetooth/Wireless"),
+    "kcpanel_bluetooth": ("无线", "Wireless"),
     "kcpanel_basic":     ("基本按键", "Basic"),
     "kcpanel_layers":    ("层控制", "Layers"),
     "kcpanel_any":       ("任意", "Any"),

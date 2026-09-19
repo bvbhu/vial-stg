@@ -83,7 +83,7 @@ _RAW = {
     ("TabbedKeycodes", "Layers"): "层控制",                             # [老]
     ("TabbedKeycodes", "Quantum"): "功能键",
     ("TabbedKeycodes", "Backlight"): "灯光控制",                        # [老]
-    ("TabbedKeycodes", "Bluetooth/Wireless"): "蓝牙/无线",
+    ("TabbedKeycodes", "Wireless"): "无线",
     ("TabbedKeycodes", "App, Media and Mouse"): "程序和鼠标",            # [老]
     ("TabbedKeycodes", "MIDI"): "MIDI",
     ("TabbedKeycodes", "Tap Dance"): "多用键",                          # [老]

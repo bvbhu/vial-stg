@@ -36,7 +36,7 @@ DYNAMIC = {
                   "Catppuccin Latte", "Catppuccin Frappe", "Catppuccin Macchiato", "Catppuccin Mocha"],
     "KeycodePanel": ["Any"],
     "TabbedKeycodes": ["Basic", "ISO/JIS", "Layers", "Quantum", "Backlight",
-                       "Bluetooth/Wireless", "App, Media and Mouse", "MIDI", "Tap Dance",
+                       "Wireless", "App, Media and Mouse", "MIDI", "Tap Dance",
                        "User", "Macro"],
     "AnalogTab": ["Actuation point", "Release point", "RT down sensitivity",
                   "RT up sensitivity", "none", "Hall effect", "Electrostatic"],
