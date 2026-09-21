@@ -80,7 +80,7 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
         self.encoder_layout = dict()
 
         # 作废 analog 握手缓存：reload 可能换了设备或固件已重刷，
-        # 沿用旧 caps 会按错误的键数/满量程/字段宽度去解析。
+        # 沿用旧 caps 会按错误的键数/最大键程值/字段宽度去解析。
         # （caps 里的 bottom_out 还是运行态，更不该跨重连复用。）
         for attr in ("_analog_caps", "_analog_max_travel", "_analog_num_keys"):
             if hasattr(self, attr):
@@ -452,7 +452,7 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
         self.restore_analog_layout(data.get("analog"))
 
     def save_analog_layout(self):
-        """导出 analog 配置供 .vil 携带：全局阈值/RT + 仅自定义键的阈值/RT/flags，不含锚点。"""
+        """导出 analog 配置供 .vil 携带：全局阈值/RT + 仅自定义键的阈值/RT/flags，不含校准端点。"""
         try:
             caps = self.analog_caps()
         except Exception:
@@ -507,7 +507,7 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
         # 按旧格式写进去会得到一条畸形配置（与 save 路径口径一致）。
         if caps.get("version") != ANALOG_PROTOCOL_VERSION:
             return
-        # 满量程不符：按约定不改现有
+        # 最大键程值不符：按约定不改现有
         if caps.get("max_travel") != data.get("max_travel"):
             return
         # 固件线格式宽度自洽性不过：不导入（否则按错偏移写出一条畸形配置）
@@ -541,7 +541,7 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
             cfg.rt_up = k.get("rt_up", cfg.rt_up)
             # flags 原样带回并确保 OVERRIDE 置位（标记为自定义，不被全局级联冲掉）
             cfg.flags = int(k.get("flags", 0)) | ANALOG_FLAG_ACTUATION_OVERRIDE
-            # 锚点不导入：从设备现读原样回填，0xF2 会顺写 raw_rest/raw_full。
+            # 校准端点不导入：从设备现读原样回填，0xF2 会顺写 raw_rest/raw_full。
             # 用 retries=3：这也在批量循环里。
             try:
                 cur = self.analog_get_key_config(ki, retries=3)

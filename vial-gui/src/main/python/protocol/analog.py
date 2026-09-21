@@ -6,10 +6,10 @@
 行程域是 0..max_travel 的整数刻度（释放≈0 / 触底=max_travel），轴体无关
 （Hall/EC 共用）。max_travel 不是固定 255：它由固件 ANALOG_MAX_TRAVEL 决定，
 经 0xF0 caps 的 msg[8..9] 上报。本模块据此选择线格式的字段宽度——
-满量程 <=255 用 uint8（配置 12 字节、0xF3 每条 3 字节），否则用 uint16
+最大键程值 <=255 用 uint8（配置 12 字节、0xF3 每条 3 字节），否则用 uint16
 （16 字节 / 4 字节）——调用方只需拿 caps 里的值，不必自己判断宽度。
 
-用法：先 analog_get_caps()（它会缓存满量程），后续所有读写自动按该宽度收发。
+用法：先 analog_get_caps()（它会缓存最大键程值），后续所有读写自动按该宽度收发。
 需要重复取 caps（如 .vil 保存/恢复）时走 analog_caps()，它带实例级缓存，不会每次
 都花一次 HID 事务。"""
 
@@ -23,12 +23,12 @@ from protocol.constants import (
     ANALOG_TRAVEL_NARROW_MAX, ANALOG_PROTOCOL_VERSION,
 )
 
-# 默认满量程：尚未握手（未读到 caps）时的保守值，与固件默认 ANALOG_MAX_TRAVEL 一致。
+# 默认最大键程值：尚未握手（未读到 caps）时的保守值，与固件默认 ANALOG_MAX_TRAVEL 一致。
 ANALOG_DEFAULT_MAX_TRAVEL = 255
 
 # 每键配置的两种线格式，字段顺序见固件 vial_analog_wire_config_t：
 #   4 项行程域阈值(触发/断开/RT 触发距离/RT 释放距离) + flags + reserved
-#   + raw_rest/raw_full(原始 ADC 域锚点) + reserved2
+#   + raw_rest/raw_full(原始 ADC 域校准端点) + reserved2
 _ANALOG_CONFIG_BYTES_NARROW = 12
 _ANALOG_CONFIG_BYTES_WIDE = 16
 
@@ -47,7 +47,7 @@ def analog_config_bytes(max_travel):
     """caps 里应出现的每键配置字节数：12（uint8 行程域）/ 16（uint16 行程域）。
 
     这个值是 caps.msg[6] 的期望取值，用于校验固件声明。
-    仅按满量程推导；线格式的最终尺寸由 analog_config_size() 从实际 fmt 算出。
+    仅按最大键程值推导；线格式的最终尺寸由 analog_config_size() 从实际 fmt 算出。
     """
     return _ANALOG_CONFIG_BYTES_WIDE if analog_travel_is_wide(max_travel) else _ANALOG_CONFIG_BYTES_NARROW
 
@@ -72,7 +72,7 @@ def analog_reading_entry_size(max_travel):
 
 
 class AnalogKeyConfig:
-    """每键配置 + 校准锚点，与固件 vial_analog_wire_config_t 一致（小端）。
+    """每键配置 + 校准端点，与固件 vial_analog_wire_config_t 一致（小端）。
 
     from_bytes/to_bytes 必须带 max_travel：字段宽度随行程域走，故意不设默认值，
     强制调用方从 caps 取，而不是默默按 255 解析 16 字节的包。
@@ -92,8 +92,11 @@ class AnalogKeyConfig:
 
     @classmethod
     def from_bytes(cls, b, max_travel):
+        """短回包（固件异常/掉线）不抛 struct.error，回落默认配置。"""
         c = cls()
         size = analog_config_size(max_travel)
+        if len(b) < size:
+            return c
         (c.actuation_point, c.release_point, c.rt_down, c.rt_up, c.flags, _,
          c.raw_rest, c.raw_full, _) = struct.unpack(_config_fmt(max_travel), b[:size])
         return c
@@ -118,12 +121,12 @@ class AnalogKeyConfig:
 class ProtocolAnalog:
     """混入类：挂到 Keyboard 上，提供 0xF0-0xF6 命令封装。
 
-    analog_get_caps() 会把固件上报的满量程缓存在实例上，后续读写全部据此选宽度。
+    analog_get_caps() 会把固件上报的最大键程值缓存在实例上，后续读写全部据此选宽度。
     会话/设备重建即是新实例，缓存随之作废——固件是编译期常量，同一设备不会变。
     """
 
     def analog_max_travel(self):
-        """当前设备的行程域满量程。未握手时按默认 255（窄格式）。"""
+        """当前设备的行程域最大键程值。未握手时按默认 255（窄格式）。"""
         return getattr(self, "_analog_max_travel", ANALOG_DEFAULT_MAX_TRAVEL)
 
     def analog_caps(self, refresh=False):
@@ -156,14 +159,14 @@ class ProtocolAnalog:
             "config_size": data[6],
             # 固件触底校准开关的运行态(msg[7])：GUI 重启后能把开关对上
             "bottom_out": data[7],
-            # 行程域满量程(msg[8..9] 小端)
+            # 行程域最大键程值(msg[8..9] 小端)
             "max_travel": data[8] | (data[9] << 8),
         }
-        # 满量程为 0 属异常/不支持的固件：回落到默认值，免得后面所有宽度判断
+        # 最大键程值为 0 属异常/不支持的固件：回落到默认值，免得后面所有宽度判断
         # 都按 0 走（0 会让行程域宽度判断与各种比例换算全部失去意义）。
         if not caps["max_travel"]:
             caps["max_travel"] = ANALOG_DEFAULT_MAX_TRAVEL
-        # 固件在 caps.msg[6] 里声明的配置字节数必须与满量程推导出的宽度自洽。
+        # 固件在 caps.msg[6] 里声明的配置字节数必须与最大键程值推导出的宽度自洽。
         # 二者由固件同一条判据推出、并由静态断言绑死；一旦不一致，后续按错误
         # 偏移解析整条配置都是错的——宁可在这里就认定"不支持"。
         caps["config_bytes_ok"] = (caps["config_size"] == analog_config_bytes(caps["max_travel"]))
@@ -204,10 +207,16 @@ class ProtocolAnalog:
         """返回 [(travel, raw), ...]，每条 = 行程(1 或 2 字节 LE) + raw 16bit LE。"""
         data = self.usb_send(self.dev, struct.pack("<BBH", CMD_VIA_VIAL_PREFIX, CMD_VIAL_ANALOG_GET_KEY_READINGS, start_ki),
                              retries=3)
+        # 空回包（掉线/固件未响应）直接返回空列表：下面 data[0] 会 IndexError。
+        if not data:
+            return []
         n = data[0]
         max_travel = self.analog_max_travel()
         wide = analog_travel_is_wide(max_travel)
         stride = analog_reading_entry_size(max_travel)
+        # 回包长度不可信：声明的条数超过实际字节数时按实际长度夹下来，
+        # 否则下面的 data[o + 1] 会 IndexError。
+        n = min(n, (len(data) - 1) // stride)
         readings = []
         for i in range(n):
             o = 1 + i * stride

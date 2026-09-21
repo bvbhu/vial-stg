@@ -88,17 +88,18 @@ ANALOG_CAL_AUTO_PEAK        = 3
 ANALOG_CAL_BOTTOM_OUT_ON    = 4  # 触底校准模式开：全部键等效 KC_NO，逐个按满即采集
 ANALOG_CAL_BOTTOM_OUT_OFF   = 5  # 触底校准模式关
 
-# 协议版本号。真源在固件：vial-qmk-stg/quantum/vial.c 的 VIAL_ANALOG_PROTOCOL_VERSION。
+# 协议版本号。真源在固件：vial-qmk-stg/quantum/analog/analog_core.h 的
+# VIAL_ANALOG_PROTOCOL_VERSION（空口线格式与 EEPROM 落盘布局共用这一个编号，
+# bump 即令旧 EEPROM 整区作废回出厂值）。
 # 两侧等值匹配，不一致即拒绝接管该标签页（不支持 analog 的固件会把请求包原样回显，
 # 版本号是唯一可靠的挡板）。
 # 线格式/语义改动时必须同时改：①固件那个宏 ②本行 ③协议文档 §2 的版本史表。
 # test_gui.py::test_analog_protocol_version_pinned 把本值钉死，bump 时会先红——那正是提醒。
 ANALOG_PROTOCOL_VERSION = 1
-# 版本史已重置：早期开发期编号(0x0E-0x13 子命令、拉模型、每次 0xF2 自动落盘)全部废弃，
-# 本基线从 1 重新起算，固件不留旧版本分支。
+# 版本基线：本基线从 1 起算，固件不留任何旧版本分支。
 
-# 行程域宽度的分界：满量程 <= 255 用 uint8。0..255 本就装得下 uint8，
-# 且默认满量程 255 必须走窄格式，否则默认板的协议包会无谓地整体膨胀。
+# 行程域宽度的分界：最大键程值 <= 255 用 uint8。0..255 本就装得下 uint8，
+# 且默认最大键程值 255 必须走窄格式，否则默认板的协议包会无谓地整体膨胀。
 # 具体线格式尺寸由 protocol/analog.py 按本分界从 struct 格式串算出，不在此重复定义。
 ANALOG_TRAVEL_NARROW_MAX = 255
 

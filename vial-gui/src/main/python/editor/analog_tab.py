@@ -20,7 +20,7 @@ analog_set_global 级联刷新所有跟随键（GUI 不逐键补写）。
 0xF2 只改 RAM 不落盘：点"保存到 EEPROM"(0xF6) 才写入 EEPROM，
 一轮调节压成一次 flash 提交；校准(0xF4)/恢复默认(0xF5)仍即时落盘。
 
-行程域满量程(最大键程)由固件 ANALOG_MAX_TRAVEL 决定，经 0xF0 caps 上报：
+行程域最大键程值由固件 ANALOG_MAX_TRAVEL 决定，经 0xF0 caps 上报：
 GUI 不假设它是 255，所有行程量纲的控件(标尺、手柄、RT 滑块)按上报值定量程，
 线格式宽度(12/16 字节)也由该值决定。
 
@@ -63,8 +63,8 @@ def _retain_space(widget):
 class TravelProgressBar(QWidget):
     """行程区（参照用户参考图，从左到右四列）：
 
-    1. 纵向进度条：比背景更暗的凹槽 + 高亮填充，填充高度 = 当前行程（0 在上、满量程在下）
-    2. 刻度列：顶部 0、其下"行程 N"实时读数、底部满量程
+    1. 纵向进度条：比背景更暗的凹槽 + 高亮填充，填充高度 = 当前行程（0 在上、最大键程值在下）
+    2. 刻度列：顶部 0、其下"行程 N"实时读数、底部最大键程值
     3. 竖线轨道分三段：断开点以上 / 两点之间(死区) / 触发点以下。
        轨道三段与两个手柄全部交给 QStyle 绘制（样式凹槽 + 样式填充 + 样式手柄），
        配色、渐变、暗边与 RT 滑块逐像素同源（拖动发 changed()）
@@ -91,9 +91,9 @@ class TravelProgressBar(QWidget):
         self.actuation = 200
         self.release = 192
         self.travel = None  # None = 全局模式，行程读数显示占位
-        # 行程域满量程（固件 ANALOG_MAX_TRAVEL，经 0xF0 caps 上报）。
+        # 行程域最大键程值（固件 ANALOG_MAX_TRAVEL，经 0xF0 caps 上报）。
         # 本控件所有"值 ↔ 像素"换算与上限都取它，而不是写死 255：
-        # 满量程大于 255 时行程/阈值是 uint16，刻度与手柄位置必须同比缩放。
+        # 最大键程值大于 255 时行程/阈值是 uint16，刻度与手柄位置必须同比缩放。
         self.max_travel = ANALOG_DEFAULT_MAX_TRAVEL
         # 列1/列2（行程进度条 + 行程读数）是否绘制：全局模式下这两列无意义，
         # 但列3/列4 的触发/断开设置轨与手柄必须保留。只影响绘制，不改尺寸/布局。
@@ -114,11 +114,11 @@ class TravelProgressBar(QWidget):
     def _apply_scale_metrics(self):
         """按标尺所需的列宽重算列2 宽度与列3/列4 的 x，替掉固定像素栅格。
 
-        用位数（而非运行环境字体度量）估算宽度，保证布局只随满量程位数变化、
+        用位数（而非运行环境字体度量）估算宽度，保证布局只随最大键程值位数变化、
         不随系统字体/缩放漂移：窄域(255，"Travel"6字符)恰好落在原始栅格
-        (_TRACK_X=92、_LABEL_X=114)；满量程数字位数更多时才右移让位。
+        (_TRACK_X=92、_LABEL_X=114)；最大键程值数字位数更多时才右移让位。
         """
-        # 每字符固定估算宽度（与默认 GUI 字体近似）；取 "0"/满量程/"Travel" 中最长串。
+        # 每字符固定估算宽度（与默认 GUI 字体近似）；取 "0"/最大键程值/"Travel" 中最长串。
         longest = max(("0", str(self.max_travel), tr("AnalogTab", "Travel")), key=len)
         need = len(longest) * 8 + 6
         self._scale_w = max(self._SCALE_W_MIN, need)
@@ -128,9 +128,9 @@ class TravelProgressBar(QWidget):
 
     # ------------------------------------------------------------ 值接口 ----
     def set_max_travel(self, max_travel):
-        """设定行程域满量程（连接固件后由 caps 传入）。
+        """设定行程域最大键程值（连接固件后由 caps 传入）。
 
-        满量程变小（如换了一台窄域的键盘）时，手上的旧阈值会越界：一律收进新域，
+        最大键程值变小（如换了一台窄域的键盘）时，手上的旧阈值会越界：一律收进新域，
         否则手柄/滑块会落在刻度区外、而写回固件的值也是越界的。
         """
         max_travel = max(1, int(max_travel))
@@ -141,7 +141,7 @@ class TravelProgressBar(QWidget):
         self.release = max(0, min(max_travel, self.release))
         if self.travel is not None:
             self.travel = max(0, min(max_travel, self.travel))
-        # 满量程位数变了，标尺列宽随之重算（窄 3 位 -> 宽 4 位）
+        # 最大键程值位数变了，标尺列宽随之重算（窄 3 位 -> 宽 4 位）
         self._apply_scale_metrics()
         self.update()
 
@@ -318,7 +318,7 @@ class TravelProgressBar(QWidget):
         # 但列3/列4 的触发/断开设置轨与手柄必须保留——那正是全局参数本身。
         # 只跳过绘制、不改尺寸，所以隐藏这两列不会影响布局。
         if self._travel_cols:
-            # 列2 刻度：顶 0、其下"行程 N"实时读数、底 满量程(固件 ANALOG_MAX_TRAVEL)
+            # 列2 刻度：顶 0、其下"行程 N"实时读数、底 最大键程值(固件 ANALOG_MAX_TRAVEL)
             qp.setPen(text_color)
             sw = self._scale_w
             qp.drawText(QRect(self._SCALE_X, top - 2, sw, 16), Qt.AlignLeft | Qt.AlignVCenter, "0")
@@ -347,7 +347,7 @@ class TravelProgressBar(QWidget):
                 qp.drawRoundedRect(QRectF(self._BAR_X0, top, bar_w,
                                           max(10.0, self._y_of(self.travel) - top)), 8, 8)
 
-        # 列3 手柄轨道：分三段画，两点之间是 RT 死区(迟滞带)，与外侧两段明显不同。
+        # 列3 手柄轨道：分三段画，两点之间是 RT 死区(死区带)，与外侧两段明显不同。
         # 三段都是样式画的（与 RT 滑杆同源），坐标取整后逐段相邻，不留缝不重叠。
         y_rel = self._y_of(self.release)
         y_act = self._y_of(self.actuation)
@@ -590,10 +590,10 @@ class AnalogTab(BasicEditor):
         self.caps = None
         self.num_keys = 0
         self.rows = self.cols = 0
-        # 行程域满量程（固件 ANALOG_MAX_TRAVEL）。握手前按默认 255，
+        # 行程域最大键程值（固件 ANALOG_MAX_TRAVEL）。握手前按默认 255，
         # 读到 caps 后由 _apply_max_travel 铺到行程轨道与 RT 滑块上。
         self.max_travel = ANALOG_DEFAULT_MAX_TRAVEL
-        self.rt_end_labels = {}  # RT 滑块末端刻度标签，随满量程改字
+        self.rt_end_labels = {}  # RT 滑块末端刻度标签，随最大键程值改字
         self.configs = {}
         self.selected = None
         self.keyboard = None
@@ -824,9 +824,9 @@ class AnalogTab(BasicEditor):
 
     # ------------------------------------------------------------ interface
     def _apply_max_travel(self, max_travel):
-        """把固件上报的行程域满量程铺给所有以"行程"为单位的控件。
+        """把固件上报的行程域最大键程值铺给所有以"行程"为单位的控件。
 
-        行程轨道按满量程缩放；RT 距离滑块落在同一行程域上（它调的是两点之差），
+        行程轨道按最大键程值缩放；RT 距离滑块落在同一行程域上（它调的是两点之差），
         量程与末端刻度必须跟着走，否则宽域固件下这些控件一半的量程够不着。
         """
         self.max_travel = max(1, int(max_travel))
@@ -885,7 +885,7 @@ class AnalogTab(BasicEditor):
             self.container.setEnabled(False)
             self._force_bottom_out_off()
             return
-        # 固件声明的配置字节数(msg[6])与满量程推导出的宽度必须一致：不一致说明按
+        # 固件声明的配置字节数(msg[6])与最大键程值推导出的宽度必须一致：不一致说明按
         # 错误偏移解析整条配置，直接判为不支持，别带着错位去读写设备。
         if not caps.get("config_bytes_ok", False):
             self.container.setEnabled(False)
@@ -963,7 +963,7 @@ class AnalogTab(BasicEditor):
 
     def _show_global_mode(self):
         """未选键时进入全局参数模式：手柄显示固件全局槽的值，
-        行程与三个读数显示无意义占位（全局槽不含锚点、无"当前行程"概念）。"""
+        行程与三个读数显示无意义占位（全局槽不含校准端点、无"当前行程"概念）。"""
         self.selected = None
         self.lbl_key.setText(tr("AnalogTab", "Global parameters"))
         self._detail_panel.show()
@@ -1023,7 +1023,7 @@ class AnalogTab(BasicEditor):
     def _update_all_keys_text(self):
         """更新所有键面的配置值文字。两种显示模式由顶部按钮切换：
         act_rel：上=断开点，下=触发点；rt：上=RT上行灵敏度，下=RT下行灵敏度，
-        未开 RT 或值为 0 不显示。列宽按满量程位数取，等宽对齐。"""
+        未开 RT 或值为 0 不显示。列宽按最大键程值位数取，等宽对齐。"""
         colw = len(str(self.max_travel))
         for ki, w in self._ki_widgets.items():
             cfg = self.configs.get(ki)
@@ -1142,8 +1142,8 @@ class AnalogTab(BasicEditor):
         # 单独调节某个键时标记"已自定义"，全局调节不再覆盖它
         if self.selected is not None:
             cfg.flags |= ANALOG_FLAG_ACTUATION_OVERRIDE
-            # 锚点必须原样带回：0xF2 会顺写 raw_rest/raw_full，而 AnalogKeyConfig 的默认值
-            # 是 0/255——不回带就会把已校准的锚点冲掉，界面随即显示 Rest 0 / Bottom 255，
+            # 校准端点必须原样带回：0xF2 会顺写 raw_rest/raw_full，而 AnalogKeyConfig 的默认值
+            # 是 0/255——不回带就会把已校准的校准端点冲掉，界面随即显示 Rest 0 / Bottom 255，
             # 看着就像"这个键的校准读数不对"。
             old = self.configs.get(self.selected)
             if old is not None:
@@ -1184,7 +1184,7 @@ class AnalogTab(BasicEditor):
             return True
         if self.selected is not None and self.selected in self._unread_keys:
             # 本键在加载时没读到，面板上是从占位值改出来的：写进去只会往设备 RAM
-            # 灌一份伪造的锚点/阈值。直接拒答，等重连后重新加载。
+            # 灌一份伪造的校准端点/阈值。直接拒答，等重连后重新加载。
             self._pending_config = None
             self._flash_status(tr("AnalogTab", "This key could not be read; reconnect to edit it"))
             return False
@@ -1392,7 +1392,7 @@ class AnalogTab(BasicEditor):
 
     # ------------------------------------------------------------ calibrate
     def _reload_all_configs(self):
-        """校准改动了所有键的锚点：整份缓存作废重拉(0xF1 × num_keys)。
+        """校准改动了所有键的校准端点：整份缓存作废重拉(0xF1 × num_keys)。
         只刷新当前选中键的话，其它键的 Rest/Bottom 会一直显示校准前的旧值。"""
         self._all_configs_loaded = False
         self._global_cfg = None
@@ -1428,8 +1428,8 @@ class AnalogTab(BasicEditor):
             self._flash_status(tr("AnalogTab", "Bottom readings sampled"))
 
     def on_cal_full_toggled(self, on):
-        """触底校准开关：开=固件抑制全部键输出(等效 KC_NO)、逐个按满即自动采集触底锚点；
-        关=固件结束模式并回读全部锚点。协议失败则把开关弹回原状态。"""
+        """触底校准开关：开=固件抑制全部键输出(等效 KC_NO)、逐个按满即自动采集触底校准端点；
+        关=固件结束模式并回读全部校准端点。协议失败则把开关弹回原状态。"""
         if self.device is None or self.caps is None or \
                 not (self.caps["caps"] & ANALOG_CAP_BOTTOM_OUT_CAL):
             self._untoggle(self.chk_cal_full, False)
@@ -1450,7 +1450,7 @@ class AnalogTab(BasicEditor):
             self._flash_status(tr("AnalogTab", "Bottom readings sampled"))
 
     def on_follow_toggled(self, checked):
-        """勾选=转回跟随全局(0xF5 单键复位，保留本键锚点)；取消=按当前面板值转自定义。"""
+        """勾选=转回跟随全局(0xF5 单键复位，保留本键校准端点)；取消=按当前面板值转自定义。"""
         if self._loading_ui or self.selected is None:
             return
         if checked:
@@ -1464,7 +1464,7 @@ class AnalogTab(BasicEditor):
             self._flush_timer.start()
 
     def do_reset_key(self):
-        """该键跟随全局值（固件 0xF5 单键：回全局组，保留本键校准锚点）。"""
+        """该键跟随全局值（固件 0xF5 单键：回全局组，保留本键校准端点）。"""
         if self.device is None or self.selected is None:
             return
         try:
@@ -1476,7 +1476,7 @@ class AnalogTab(BasicEditor):
             pass
 
     def do_reset_all(self):
-        """所有键恢复默认值（固件 0xF5/0xFFFF 出厂重置，连锚点一起回出厂并立即落盘）。"""
+        """所有键恢复默认值（固件 0xF5/0xFFFF 出厂重置，连校准端点一起回出厂并立即落盘）。"""
         if self.device is None:
             return
         # 先退出触底校准模式，否则重置完键盘看起来像坏的

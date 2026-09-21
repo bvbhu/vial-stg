@@ -93,7 +93,7 @@ class VirtualKeyboard:
         self.analog_axis_type = 1  # hall
         self.analog_caps = 0x3F    # 五个基础能力位 + bit5 触底校准开关
         self.analog_bottom_out = False  # 0xF4 mode4/5 的运行态，随 caps 的 msg[7] 回报
-        # 行程域满量程(对应固件 ANALOG_MAX_TRAVEL)：<=255 走 uint8 线格式，否则 uint16。
+        # 行程域最大键程值(对应固件 ANALOG_MAX_TRAVEL)：<=255 走 uint8 线格式，否则 uint16。
         # 测试里把它改成 >255 即可覆盖宽域分支。
         self.analog_max_travel = 255
         # 全局默认槽(对应固件 g_analog_global：4 阈值 + RT 开关)
@@ -189,7 +189,7 @@ class VirtualKeyboard:
                            flags, 0, k["raw_rest"], k["raw_full"], 0)
 
     def _analog_store(self, ki, act, rel, rtd, rtu, flags, raw_rest, raw_full):
-        """解包写入，镜像固件：全局槽忽略锚点/OVERRIDE；单键写即转自定义。"""
+        """解包写入，镜像固件：全局槽忽略校准端点/OVERRIDE；单键写即转自定义。"""
         rt = bool(flags & ANALOG_FLAG_RT_ENABLED)
         if ki == 0xFFFF:
             self.analog_global = {"actuation": act, "release": rel, "rt_down": rtd, "rt_up": rtu, "rt": rt}
@@ -207,7 +207,7 @@ class VirtualKeyboard:
             self.analog_caps_count += 1
             # 布局按协议文档：msg[0]=ver, msg[1..2]=num_keys(LE16), msg[3]=axis,
             # msg[4]=caps, msg[5]=max_readings, msg[6]=config_size,
-            # msg[7]=触底校准开关状态, msg[8..9]=满量程(LE16)
+            # msg[7]=触底校准开关状态, msg[8..9]=最大键程值(LE16)
             return struct.pack("<BHBBBBBH", 1, num,
                                self.analog_axis_type, self.analog_caps,
                                self._analog_max_readings(), self._analog_cfg_size(),
@@ -238,7 +238,7 @@ class VirtualKeyboard:
         elif cmd == CMD_VIAL_ANALOG_CALIBRATE:
             mode = msg[2]
             # mode 4/5：触底校准开关(纯运行态)——开启期间固件抑制全部键输出，
-            # 扫描侧只推高各键 bottom 锚点；关闭即结束，GUI 回读全部锚点
+            # 扫描侧只推高各键 bottom 校准端点；关闭即结束，GUI 回读全部校准端点
             if mode in (4, 5):
                 self.analog_bottom_out = (mode == 4)
                 return b"\x00"
@@ -270,7 +270,7 @@ class VirtualKeyboard:
                 k = self.analog_keys[ki]
                 k.update({"actuation": g["actuation"], "release": g["release"],
                           "rt_down": g["rt_down"], "rt_up": g["rt_up"], "rt": g["rt"],
-                          "customized": False})  # 校准锚点保留
+                          "customized": False})  # 校准端点保留
             return b"\x00"
         elif cmd == CMD_VIAL_ANALOG_PERSIST_COMMIT:
             return b"\x00"
@@ -778,10 +778,10 @@ def test_analog_tab(qtbot):
     assert tab.caps["version"] == 1
     assert tab.num_keys == 4
     assert tab.rows == 2 and tab.cols == 2
-    # 窄域(默认满量程 255)：12 字节配置、每包最多 10 条读数
+    # 窄域(默认最大键程值 255)：12 字节配置、每包最多 10 条读数
     assert tab.caps["max_travel"] == 255 and tab.max_travel == 255
     assert tab.caps["config_size"] == 12 and tab.caps["max_readings"] == 10
-    # caps 自洽性：msg[6] 必须等于满量程推导出的宽度，否则整个标签页不该接管
+    # caps 自洽性：msg[6] 必须等于最大键程值推导出的宽度，否则整个标签页不该接管
     assert tab.caps["config_bytes_ok"]
 
     # 未选键 → 全局模式：手柄显示固件全局槽的值；行程与三个读数是无意义占位
@@ -828,7 +828,7 @@ def test_analog_tab(qtbot):
     assert vk.analog_keys[2]["actuation"] == 150
     assert vk.analog_keys[2]["release"] == 100
     assert vk.analog_keys[2]["customized"]
-    # 锚点必须原样带回：0xF2 顺写 raw_rest/raw_full，不回带会被默认值(0/255)冲掉
+    # 校准端点必须原样带回：0xF2 顺写 raw_rest/raw_full，不回带会被默认值(0/255)冲掉
     assert vk.analog_keys[2]["raw_rest"] == 375
     assert vk.analog_keys[2]["raw_full"] == 675
 
@@ -841,7 +841,7 @@ def test_analog_tab(qtbot):
     assert tab.track.travel == 128
     assert "500" in tab.lbl_raw.text()
 
-    # 单键重置：回全局组（OVERRIDE 清除），锚点保留，UI 同步
+    # 单键重置：回全局组（OVERRIDE 清除），校准端点保留，UI 同步
     tab.do_reset_key()
     assert not vk.analog_keys[2]["customized"]
     assert tab.configs[2].actuation_point == 150
@@ -863,7 +863,7 @@ def test_analog_tab(qtbot):
     assert resets == [(CMD_VIAL_ANALOG_RESET_KEY, 2)]
     assert not vk.analog_keys[2]["customized"]
 
-    # 触底校准开关：开=0xF4 mode4、关=mode5 并回读全部锚点；结果写状态行，不被轮询覆盖
+    # 触底校准开关：开=0xF4 mode4、关=mode5 并回读全部校准端点；结果写状态行，不被轮询覆盖
     vk.analog_cmd_log.clear()
     tab.chk_cal_full.setChecked(True)
     assert vk.analog_bottom_out is True
@@ -896,7 +896,7 @@ def test_analog_protocol_version_pinned():
 
 
 def test_analog_track_scale_adapts(qtbot):
-    """进度控件列2 的宽度随满量程位数自适应，且窄域下不改变原有像素栅格。"""
+    """进度控件列2 的宽度随最大键程值位数自适应，且窄域下不改变原有像素栅格。"""
     mw, vk = prepare(qtbot, FAKE_KEYBOARD)
     tab = mw.analog_tab
     track = tab.track
@@ -906,7 +906,7 @@ def test_analog_track_scale_adapts(qtbot):
     assert track._TRACK_X == 92 and track._LABEL_X == 114, (track._TRACK_X, track._LABEL_X)
     assert track._scale_w == track._SCALE_W_MIN
 
-    # 宽域：满量程数字位数超过窄域时，列2 必须跟着变大、整体右移让位。
+    # 宽域：最大键程值数字位数超过窄域时，列2 必须跟着变大、整体右移让位。
     # 用 13 位超大值确保列宽必然越过 _SCALE_W_MIN（与具体字体无关，可复现）。
     track.set_max_travel(10**12)
     assert track._scale_w > track._SCALE_W_MIN, track._scale_w
@@ -917,7 +917,7 @@ def test_analog_track_scale_adapts(qtbot):
 
 
 def test_analog_wide_travel(qtbot):
-    """满量程 >255：行程域升为 uint16，GUI 必须全程按 caps 自适应，不得写死 255/12 字节。"""
+    """最大键程值 >255：行程域升为 uint16，GUI 必须全程按 caps 自适应，不得写死 255/12 字节。"""
     mw, vk = prepare(qtbot, FAKE_KEYBOARD)
     tab = mw.analog_tab
     assert tab.caps["config_size"] == 12 and tab.caps["max_readings"] == 10
@@ -928,7 +928,7 @@ def test_analog_wide_travel(qtbot):
     assert tab.caps["max_travel"] == 4096
     assert tab.caps["config_size"] == 16 and tab.caps["max_readings"] == 7
     assert tab.caps["config_bytes_ok"]
-    # 满量程铺到行程轨道、RT 滑块量程与末端刻度
+    # 最大键程值铺到行程轨道、RT 滑块量程与末端刻度
     assert tab.max_travel == 4096 and tab.track.max_travel == 4096
     for s in tab.rt_sliders.values():
         assert s.maximum() == 4096
@@ -975,7 +975,7 @@ def test_analog_wide_travel(qtbot):
 
 
 def test_analog_vil_export_import(qtbot):
-    """analog 配置随 .vil 导入导出：只含全局+自定义键阈值/RT/flags，不含锚点；max_travel 不符则不改。"""
+    """analog 配置随 .vil 导入导出：只含全局+自定义键阈值/RT/flags，不含校准端点；max_travel 不符则不改。"""
     import json
     mw, vk = prepare(qtbot, FAKE_KEYBOARD)
     # 注入：全局值 + 两个自定义键(键1带 CONTINUOUS)，键0/2 跟随全局不导出
@@ -998,7 +998,7 @@ def test_analog_vil_export_import(qtbot):
     assert k1["actuation_point"] == 130 and k1["release_point"] == 90
     assert k1["flags"] & ANALOG_FLAG_ACTUATION_OVERRIDE
     assert k1["flags"] & ANALOG_FLAG_CONTINUOUS
-    assert "raw_rest" not in k1 and "raw_full" not in k1  # 锚点不导出
+    assert "raw_rest" not in k1 and "raw_full" not in k1  # 校准端点不导出
 
     # 导入：先重置 vk 状态，再 restore
     vk.analog_global = {"actuation": 200, "release": 192, "rt_down": 10, "rt_up": 10, "rt": False}
@@ -1010,7 +1010,7 @@ def test_analog_vil_export_import(qtbot):
     assert vk.analog_global == {"actuation": 150, "release": 100, "rt_down": 8, "rt_up": 7, "rt": True}
     assert vk.analog_keys[1]["actuation"] == 130 and vk.analog_keys[1]["customized"]
     assert vk.analog_keys[1]["continuous"]
-    assert vk.analog_keys[1]["raw_rest"] == 375  # 锚点未被导入覆盖
+    assert vk.analog_keys[1]["raw_rest"] == 375  # 校准端点未被导入覆盖
     assert vk.analog_keys[3]["actuation"] == 140
 
     # max_travel 不符则不动现有
