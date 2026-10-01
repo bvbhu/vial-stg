@@ -24,6 +24,11 @@ class KeyWidget:
         self.color = None
         self.mask_color = None
         self.scale = 0
+        # 行程调试覆盖层：None=不显示；0..travel_max 的柱状图高度，
+        # 由 KeyboardWidget.paintEvent 统一绘制(见 set_travel)。
+        self.travel = None
+        self.travel_max = 0
+        self.travel_actuation = 0
 
         self.rotation_angle = desc.rotation_angle
 
@@ -189,6 +194,29 @@ class KeyWidget:
 
     def setPressed(self, pressed):
         self.pressed = pressed
+
+    def set_travel(self, travel, travel_max, actuation):
+        """设置行程调试覆盖值，返回是否发生变化(供调用方决定是否重绘)。
+
+        travel=None 或 travel_max<=0 视为清除覆盖层；actuation 用于
+        paintEvent 里区分"未到触发点(暗色)"与"达到触发点(亮色)"。
+        """
+        if travel is None or travel_max is None or travel_max <= 0:
+            if self.travel is not None:
+                self.travel = None
+                self.travel_max = 0
+                self.travel_actuation = 0
+                return True
+            return False
+        travel = max(0, int(travel))
+        travel_max = int(travel_max)
+        actuation = max(0, int(actuation))
+        if (self.travel, self.travel_max, self.travel_actuation) == (travel, travel_max, actuation):
+            return False
+        self.travel = travel
+        self.travel_max = travel_max
+        self.travel_actuation = actuation
+        return True
 
     def setColor(self, color):
         self.color = color
@@ -442,6 +470,27 @@ class KeyboardWidget(QWidget):
                 brush = foreground_on_brush
             qp.setBrush(brush)
             qp.drawPath(key.foreground_draw_path)
+
+            # draw travel debug bar (可视化显示全键行程)：贴键帽面底部，高度 ∝ travel/max。
+            # 用键帽前景路径当裁剪区 → 填充宽度/圆角与键帽面逐像素一致(空格等宽键也贴合，
+            # 不再受键帽外扩阴影影响)。未到触发点半透明 Highlight，达到触发点转实色
+            # Highlight(与按下态同色，按压中的键仍能看出行程深浅)。文字画在其上，保持可读。
+            # None=不画(默认，行为不变)。
+            if key.travel is not None and key.travel_max > 0:
+                fpath = key.foreground_draw_path
+                frect = fpath.boundingRect()
+                if frect.width() > 0 and frect.height() > 0:
+                    bh = frect.height() * min(key.travel, key.travel_max) / key.travel_max
+                    if bh > 0:
+                        col = QColor(QApplication.palette().color(QPalette.Highlight))
+                        col.setAlpha(255 if key.travel >= key.travel_actuation else 130)
+                        qp.save()
+                        qp.setClipPath(fpath)
+                        qp.setPen(Qt.NoPen)
+                        qp.setBrush(col)
+                        qp.drawRect(QRectF(frect.left(), frect.bottom() - bh,
+                                           frect.width(), bh))
+                        qp.restore()
 
             # draw key text
             if key.masked:

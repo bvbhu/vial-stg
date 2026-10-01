@@ -64,6 +64,7 @@ PROBES = {
     "analog_release":   ("断开点", "Release point"),
     "analog_calreset":  ("重置为全局默认", "Reset to global default"),
     "analog_resetall":  ("全局重置（出厂）", "Reset all (factory)"),
+    "analog_debug":     ("可视化显示全键行程", "Visualize all-key travel"),
     "ko_labels":        ("触发按键", "Trigger"),
     "ko_opts":          ("选项", "Options"),
     "ko_checkbox":      ("在触发按键按下时激活", "Activate when the trigger key is pressed down"),
@@ -211,7 +212,8 @@ try:
     check("flash_restore", ffp)
     atp = pool(win.analog_tab)
     for name in ("analog_rt", "analog_panel",
-                 "analog_actpoint", "analog_release", "analog_calreset", "analog_resetall"):
+                 "analog_actpoint", "analog_release", "analog_calreset", "analog_resetall",
+                 "analog_debug"):
         check(name, atp)
 
     # 条目控件（无设备时不随主窗口创建，单独实例化；它们的 w2 是真 QWidget）

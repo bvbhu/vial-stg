@@ -1,0 +1,500 @@
+name: Build latest (rolling pre-release)
+
+# 滚动自动构建 + 发布 —— 机制照搬 dsh-desktop-webview/.github/workflows/build.yml。
+#
+# 触发：push 到 main（仅 GUI 相关路径），或手动 dispatch。
+# 产物：Actions Artifacts（Vial-STG-ci-<平台>-<短sha>，只留最新一次构建）。
+# 发布：构建全部成功（win/linux/mac 三平台）后，把 4 个产物上传到**固定**预发布
+#   Release（tag = env.RELEASE_TAG = ci-latest，永远只有这一个）：
+#   - 资产固定名，每次构建由 gh release upload --clobber 同名替换；
+#   - tag 随每次构建强制移到最新 commit，源码快照与资产始终同源；
+#   - Release 始终标记为 pre-release，不抢 Latest 徽标，与正式版 Release 不混淆；
+#   - 全程只操作 ci-latest 这一个 tag，其它 Release 一概不碰。
+#
+# 与版本化通道（release.yml，v*.*.* tag → 正式 Release）并存：
+#   日常最新构建走本文件，正式发版走 release.yml。
+
+on:
+  push:
+    branches: [main]
+    # 重型三平台构建只被 GUI 相关改动触发（对照 web-pages.yml 的路径过滤）；
+    # 改 README / 固件 / 桥不触发。
+    paths:
+      - 'vial-gui/**'
+      - '.github/workflows/build-latest.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: build-latest-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  # build 只读；release 要写 Release（contents: write）；cleanup 要删 artifact（actions: write）。
+  contents: write
+  actions: write
+
+env:
+  # 唯一允许被 CI 更新的 Release tag。绝不改成 v* 之类的正式版本 tag（下方有防呆）。
+  RELEASE_TAG: ci-latest
+
+jobs:
+  build-win:
+    runs-on: windows-2025
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Resolve short sha
+      shell: pwsh
+      run: |
+        $short = "${{ github.sha }}".Substring(0, 7)
+        "SHA_SHORT=$short" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        Write-Host "短 sha = $short"
+
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.6.x'
+
+    - name: Setup venv
+      working-directory: vial-gui
+      run: |
+        python -m venv venv
+        . .\venv\Scripts\activate.ps1
+        pip install -r requirements.txt
+
+    - name: Install NSIS
+      working-directory: vial-gui
+      run: |
+        Invoke-WebRequest "https://github.com/vial-kb/vial-deps/releases/download/v1/nsis-3.06.1-setup.exe" -UserAgent "wget" -OutFile nsis-setup.exe
+        if ((Get-FileHash nsis-setup.exe -Algorithm sha256).Hash -ne "f60488a676308079bfdf6845dc7114cfd4bbff47b66be4db827b89bb8d7fdc52") { Write-Error 'SHA256 mismatch' }
+        Start-Process -FilePath "nsis-setup.exe" -ArgumentList "/S", "/D=C:\Program Files (x86)\NSIS" -NoNewWindow -Wait
+
+    - name: Install Visual C++ Redistributable
+      working-directory: vial-gui
+      shell: pwsh
+      run: |
+        # fbs 0.9.0 的 freeze/windows.py::_add_missing_dlls() 会依次要求这 7 个 DLL
+        # 都能在 **PATH** 上找到（_find_on_path 遍历 PATH，不是只查 System32）：
+        #     msvcr100.dll                                      <- VC++ 2010
+        #     msvcr110.dll  msvcp110.dll                        <- VC++ 2012
+        #     vcruntime140.dll msvcp140.dll concrt140.dll vccorlib140.dll  <- VC++ 2015+
+        # 少任何一个都抛 FileNotFoundError，而它的文案**固定**写「请安装 VS 2012」，
+        # 与实际缺哪套无关 —— 现场缺的其实是 msvcr100(2010)，照文案去装 2012 会白忙。
+        # 所以这里按 DLL 逐个判定，缺哪套装哪套。
+        #
+        # 装法优先用 Chocolatey：GitHub 的 Windows 镜像自带 choco，包名长期维护，
+        # 不必去猜 download.microsoft.com 的 /download/<GUID>/ 直链 —— 那种链接一旦
+        # 失效会**返回 200 + HTML 错误页**（不是 404），Invoke-WebRequest 不报错，
+        # HTML 被存成 .exe，直到 Start-Process 才炸（本步骤历史上正是这么挂的）。
+        # 因此凡走直链的地方都先校验 PE 的 MZ 头，且把 choco 作为首选途径。
+        $ErrorActionPreference = 'Stop'
+
+        # 与 fbs 的 _find_on_path 同语义：逐段查 PATH。
+        function Find-OnPath {
+          param([string]$Name)
+          foreach ($d in ($env:PATH -split [IO.Path]::PathSeparator)) {
+            if ([string]::IsNullOrWhiteSpace($d)) { continue }
+            $p = Join-Path $d $Name
+            if (Test-Path -LiteralPath $p) { return $p }
+          }
+          return $null
+        }
+
+        $required = @(
+          'msvcr100.dll',
+          'msvcr110.dll', 'msvcp110.dll',
+          'vcruntime140.dll', 'msvcp140.dll', 'concrt140.dll', 'vccorlib140.dll'
+        )
+
+        function Get-PeFile {
+          param([string]$Name, [string]$Uri)
+          $exe = Join-Path $env:TEMP "$Name.exe"
+          Write-Host "  downloading $Name"
+          Invoke-WebRequest -Uri $Uri -OutFile $exe -UseBasicParsing
+          $fs = [System.IO.File]::OpenRead($exe)
+          try {
+            $sig = New-Object byte[] 2
+            $null = $fs.Read($sig, 0, 2)
+          } finally { $fs.Dispose() }
+          if ($sig[0] -ne 0x4D -or $sig[1] -ne 0x5A) {
+            throw "$Name is not a PE executable (no MZ header, $( (Get-Item $exe).Length ) bytes) " +
+                  "-- the URL is dead; download.microsoft.com serves an HTML error page with " +
+                  "HTTP 200 for retired /download/<GUID>/ paths."
+          }
+          return $exe
+        }
+
+        function Install-ViaChoco {
+          param([string]$Package)
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) { return $false }
+          Write-Host "  choco install $Package"
+          choco install $Package -y --no-progress --limit-output | Out-Host
+          # choco 在部分包里返回非 0 但实际已装好，故由调用方的 DLL 复查决定成败。
+          return $true
+        }
+
+        # 每套运行库：先 choco（包名稳定），失败再退回官方直链。
+        $suites = @(
+          @{ name  = 'VC++ 2010 (msvcr100)'
+             needs = @('msvcr100.dll')
+             choco = 'vcredist2010'
+             urls  = @(
+               # 只用 aka.ms 短链；VS2010 无短链，故该套依赖 choco。
+             ) }
+          @{ name  = 'VC++ 2012 (msvcr110/msvcp110)'
+             needs = @('msvcr110.dll', 'msvcp110.dll')
+             choco = 'vcredist2012'
+             urls  = @(
+               @{ n = 'vcredist_2012_x86'; u = 'https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/vcredist_x86.exe' },
+               @{ n = 'vcredist_2012_x64'; u = 'https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/vcredist_x64.exe' }
+             ) }
+          @{ name  = 'VC++ 2015-2022 (vcruntime140 系列)'
+             needs = @('vcruntime140.dll', 'msvcp140.dll', 'concrt140.dll', 'vccorlib140.dll')
+             choco = 'vcredist140'
+             urls  = @(
+               @{ n = 'vc_redist_x64'; u = 'https://aka.ms/vs/17/release/vc_redist.x64.exe' },
+               @{ n = 'vc_redist_x86'; u = 'https://aka.ms/vs/17/release/vc_redist.x86.exe' }
+             ) }
+        )
+
+        $notes = @()
+        foreach ($s in $suites) {
+          $missing = @($s.needs | Where-Object { -not (Find-OnPath $_) })
+          if (-not $missing) {
+            Write-Host "$($s.name): already on PATH"
+            continue
+          }
+          Write-Host "$($s.name): missing $($missing -join ', ')"
+
+          $ok = $false
+          try { $ok = Install-ViaChoco -Package $s.choco } catch { $notes += "$($s.choco) (choco): $($_.Exception.Message)" }
+          if ($ok -and -not @($s.needs | Where-Object { -not (Find-OnPath $_) })) {
+            Write-Host "  -> satisfied via choco"
+            continue
+          }
+
+          foreach ($r in $s.urls) {
+            try {
+              $exe = Get-PeFile -Name $r.n -Uri $r.u
+              Start-Process -FilePath $exe -ArgumentList '/install', '/quiet', '/norestart' -Wait
+              Remove-Item $exe -Force
+            } catch {
+              $notes += "$($r.n): $($_.Exception.Message)"
+              Write-Host "  ! $($r.n): $($_.Exception.Message)"
+            }
+            if (-not @($s.needs | Where-Object { -not (Find-OnPath $_) })) { break }
+          }
+        }
+
+        # 提前把缺口暴露出来，别等 fbs 用一句指向 VS2012 的误导文案报错。
+        $still = @($required | Where-Object { -not (Find-OnPath $_) })
+        if ($still) {
+          Write-Host ('::error::missing on PATH: ' + ($still -join ', '))
+          $notes | ForEach-Object { Write-Host "  - $_" }
+          # 不用 here-string：本脚本嵌在 YAML 块标量里、每行都带缩进，
+          # 而 here-string 结束符必须顶格，会被缩进破坏。
+          throw ('fbs freeze will fail; these DLLs are not on PATH: ' + ($still -join ', ') +
+                 '. fbs names VS 2012 in its message regardless of which suite is actually ' +
+                 'missing. Install the matching redistributable, or vendor the DLL into the ' +
+                 'freeze dir.')
+        }
+        Write-Host 'all Visual C++ runtimes required by fbs are available on PATH'
+
+    - name: fbs freeze
+      working-directory: vial-gui
+      run: |
+        . .\venv\Scripts\activate.ps1
+        fbs freeze
+
+    - name: fbs installer
+      working-directory: vial-gui
+      run: |
+        $env:Path += ";C:\Program Files (x86)\NSIS"
+        . .\venv\Scripts\activate.ps1
+        fbs installer
+
+    - name: Package (fixed names)
+      working-directory: vial-gui
+      run: |
+        Copy-Item "target\Vial-STGSetup.exe" "Vial-STG-win-setup.exe"
+        Compress-Archive -Path "target\Vial-STG" -DestinationPath "Vial-STG-win-portable.zip"
+        Get-ChildItem Vial-STG-win-*
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: Vial-STG-ci-win-${{ env.SHA_SHORT }}
+        path: |
+          vial-gui/Vial-STG-win-setup.exe
+          vial-gui/Vial-STG-win-portable.zip
+        if-no-files-found: error
+
+  build-linux:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Resolve short sha
+      shell: bash
+      run: |
+        short="${GITHUB_SHA:0:7}"
+        echo "SHA_SHORT=$short" >> "$GITHUB_ENV"
+
+    # 上游的 Linux 打包入口：docker build + docker run 跑 _builder.sh，
+    # 里面是 fbs freeze / fbs installer / pkg2appimage misc/Vial-STG.yml
+    - name: Build AppImage
+      working-directory: vial-gui
+      run: ./util/linux-builder/build-in-docker.sh
+
+    - name: Package (fixed name)
+      run: |
+        cp vial-gui/util/linux-builder/output/Vial-STG-x86_64.AppImage "Vial-STG-x86_64.AppImage"
+        ls -lah Vial-STG-x86_64.AppImage
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: Vial-STG-ci-linux-${{ env.SHA_SHORT }}
+        path: Vial-STG-x86_64.AppImage
+        if-no-files-found: error
+
+  build-mac:
+    runs-on: macos-15
+    env:
+      PYTHON_VERSION: 3.6.8
+      MACOSX_DEPLOYMENT_TARGET: 10.9
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Resolve short sha
+      shell: bash
+      run: |
+        short="${GITHUB_SHA:0:7}"
+        echo "SHA_SHORT=$short" >> "$GITHUB_ENV"
+
+    - name: Get Python
+      run: curl https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-macosx${MACOSX_DEPLOYMENT_TARGET}.pkg -o "python.pkg"
+
+    - name: Verify download
+      run: shasum -a 256 -c <<< '4bcd53faffc98d193ef7cdccd5668de3829c702af4db45258819a84a2cab60d0 *python.pkg'
+
+    - name: Install Python
+      run: sudo installer -pkg python.pkg -target /
+
+    - name: Setup venv
+      working-directory: vial-gui
+      run: |
+        python3.6 -m venv venv
+        source venv/bin/activate
+        pip install -r requirements.txt
+
+    - name: fbs freeze
+      working-directory: vial-gui
+      run: |
+        source venv/bin/activate
+        fbs freeze
+
+    - name: Create dmg (fixed name)
+      working-directory: vial-gui
+      run: hdiutil create -volname "Vial-STG" -srcfolder "target/Vial-STG.app" -ov -format UDZO "../Vial-STG.dmg"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: Vial-STG-ci-mac-${{ env.SHA_SHORT }}
+        path: Vial-STG.dmg
+        if-no-files-found: error
+
+  release:
+    # 只有三平台构建全部成功才发布；失败时保留 artifact 供排查，Release 不动。
+    needs: [build-win, build-linux, build-mac]
+    if: success()
+    runs-on: ubuntu-22.04
+
+    steps:
+      # 按名字取回三个 artifact；pattern 只匹配本 workflow 的前缀，不碰 release.yml 的产物。
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: Vial-STG-ci-*
+          path: release-assets
+          merge-multiple: false
+
+      - name: Stage assets
+        shell: pwsh
+        run: |
+          # artifact 目录名 = upload-artifact 的 name = 'Vial-STG-ci-<平台>-<短sha>'。
+          # GITHUB_ENV 不跨 job，所以这里用同一个 github.sha 重算短 sha（与 cleanup job 一致）。
+          $short = "${{ github.sha }}".Substring(0, 7)
+          $map = @{
+            "Vial-STG-ci-win-$short"   = @("Vial-STG-win-setup.exe", "Vial-STG-win-portable.zip")
+            "Vial-STG-ci-linux-$short" = @("Vial-STG-x86_64.AppImage")
+            "Vial-STG-ci-mac-$short"   = @("Vial-STG.dmg")
+          }
+
+          New-Item -ItemType Directory -Path "assets" -Force | Out-Null
+          foreach ($dir in $map.Keys) {
+            $src = Join-Path "release-assets" $dir
+            if (-not (Test-Path $src)) { throw "缺少 artifact 目录: $src" }
+            # 显式列出子项（含隐藏）再逐个拷，避免 * 通配符悄悄丢掉隐藏文件
+            Get-ChildItem -Path $src -Force | ForEach-Object {
+              Copy-Item -Path $_.FullName -Destination "assets" -Force
+            }
+          }
+
+          $names = @(
+            "Vial-STG-win-setup.exe",
+            "Vial-STG-win-portable.zip",
+            "Vial-STG-x86_64.AppImage",
+            "Vial-STG.dmg"
+          )
+          foreach ($n in $names) {
+            $f = Join-Path "assets" $n
+            if (-not (Test-Path $f)) { throw "缺少资产: $f" }
+            $size = (Get-Item $f).Length
+            if ($size -le 0) { throw "$f 为空文件" }
+            Write-Host ("OK: {0} = {1:N1} MB" -f $n, ($size / 1MB))
+          }
+
+      # 全流程只认 env.RELEASE_TAG 这一个 tag：不存在则创建（预发布）；存在则把 tag 强制
+      # 移到本次 commit，并同名替换资产。其它 Release（正式版等）全程不被读取、不被修改。
+      - name: Update fixed pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $repo = "${{ github.repository }}"
+          $tag  = $env:RELEASE_TAG
+          if ([string]::IsNullOrWhiteSpace($tag)) { throw "RELEASE_TAG 为空，拒绝发布" }
+          # 第一道防呆：RELEASE_TAG 必须是滚动 tag，绝不接受正式版本号形态（v1.2.3 / 1.2.3）。
+          # 滚动 tag 用固定名（ci-latest），正式发版走 release.yml，本 job 只允许操作滚动预发布。
+          if ($tag -match '^v?\d+\.\d+\.\d+') {
+            throw "RELEASE_TAG='$tag' 看起来像正式版本号，拒绝发布 —— 本 job 只发布滚动预发布"
+          }
+          # $assets 是本地文件路径，$names 是上传后在 Release 页显示的资产名，一一对应。
+          $assets = @(
+            "assets/Vial-STG-win-setup.exe",
+            "assets/Vial-STG-win-portable.zip",
+            "assets/Vial-STG-x86_64.AppImage",
+            "assets/Vial-STG.dmg"
+          )
+          $names = @(
+            "Vial-STG-win-setup.exe",
+            "Vial-STG-win-portable.zip",
+            "Vial-STG-x86_64.AppImage",
+            "Vial-STG.dmg"
+          )
+
+          $short  = "${{ github.sha }}".Substring(0, 7)
+          $when   = [DateTime]::UtcNow.ToString("yyyy-MM-dd HH:mm 'UTC'")
+          $notes  = "CI 滚动构建（预发布，非正式版本）。`n`n提交: ${{ github.sha }}（$short）`n构建时间: $when`n`n资产为固定名，每次构建覆盖。"
+
+          # release 是否已存在
+          $exists = $false
+          gh release view $tag --repo $repo 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { $exists = $true }
+
+          if (-not $exists) {
+            # 第二道防呆：tag 必须「尚不存在」或「本仓库自己的轻量 tag」。
+            # 轻量 tag 由 gh release create 创建（直接指向 commit）；注解 tag（object.type=tag、
+            # 指向 tag 对象）多半来自正式发版流程 —— 绝不允许 CI 首次创建时就套在正式版本 tag 上。
+            $tagRef = gh api "repos/$repo/git/ref/tags/$tag" 2>$null | ConvertFrom-Json
+            if ($LASTEXITCODE -eq 0) {
+              if ($tagRef.object.type -ne "commit") {
+                throw "tag '$tag' 是注解 tag（object.type=$($tagRef.object.type)），疑似正式版本 tag，拒绝创建 Release —— 请确认 RELEASE_TAG 没被改成正式版本 tag"
+              }
+              # 本仓库自己的轻量 tag（滚动流程残留：Release 被删但 tag 还在）→ 放行：
+              # 先把它挪到本次 commit，再让 gh release create 挂到这个现有 tag 上。
+              Write-Host "tag '$tag' 已存在且是本仓库的轻量 tag，先移到本次 commit 再复用"
+              gh api -X PATCH "repos/$repo/git/refs/tags/$tag" `
+                -f sha="${{ github.sha }}" -F force=true | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "移动 tag '$tag' 到本次 commit 失败: $LASTEXITCODE" }
+            }
+
+            Write-Host "创建固定预发布 Release: $tag"
+            # --target 让 tag 落在本次构建的 commit 上（dispatch 到非默认分支时也不会指错）。
+            # tag 已由上面 PATCH 挪好时，gh release create 直接复用它，不再新建。
+            gh release create $tag `
+              --repo $repo `
+              --target "${{ github.sha }}" `
+              --prerelease `
+              --title "Vial-STG CI Latest (预发布)" `
+              --notes $notes | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "gh release create 失败: $LASTEXITCODE" }
+          } else {
+            # 已存在：刷新标题/描述（含预发布标记），并把 tag 强制移到本次 commit ——
+            # 这是滚动发布的语义：资产同名替换（见下方 --clobber），源码快照也跟着走。
+            # PATCH git/ref 只作用于 ci-latest 这一个 ref，其它 tag / Release 一概不碰。
+            gh release edit $tag --repo $repo --prerelease --title "Vial-STG CI Latest (预发布)" --notes $notes | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "gh release edit 失败: $LASTEXITCODE" }
+
+            # 移动 tag 必须带 force=true（tag 不允许非快进移动）；-F 让 gh 把它发成布尔值。
+            # 若 tag 已在本次 commit（同一 run 重跑），这是无操作，照样成功。
+            gh api -X PATCH "repos/$repo/git/refs/tags/$tag" `
+              -f sha="${{ github.sha }}" -F force=true | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "移动 tag '$tag' 到本次 commit 失败: $LASTEXITCODE" }
+
+            Write-Host "已存在 Release '$tag'，tag 已移到本次 commit，准备用 --clobber 覆盖同名资产。"
+          }
+
+          # —— 直接用 upload --clobber 上传，不再先 delete-asset ——
+          # --clobber 在资产已存在时自动替换、不存在时直接新建，两种情况一条命令搞定。
+          # 原来「先 delete 后 upload」反而有竞态：删除后上传若失败，Release 会缺资产。
+          foreach ($a in $assets) {
+            if (-not (Test-Path $a)) { throw "缺少待上传文件: $a" }
+            gh release upload $tag $a --repo $repo --clobber | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "gh release upload $a 失败: $LASTEXITCODE" }
+            Write-Host "已上传: $a"
+          }
+
+          # 终检：Release 必须仍是预发布（不抢 Latest 徽标），且四个资产都在。
+          $info = gh release view $tag --repo $repo --json isPrerelease,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "gh release view 失败: $LASTEXITCODE" }
+          if (-not $info.isPrerelease) { throw "Release '$tag' 不是预发布状态 —— 拒绝继续" }
+          $got = @($info.assets | ForEach-Object { $_.name })
+          foreach ($n in $names) {
+            if ($n -notin $got) { throw "Release 缺少资产: $n" }
+          }
+          Write-Host ("OK: {0} 为预发布，资产齐全: {1}" -f $tag, ($got -join ', '))
+
+  cleanup:
+    needs: [build-win, build-linux, build-mac]
+    if: success()
+    runs-on: ubuntu-22.04
+
+    steps:
+      # 只保留最新一次构建。用 runner 预装的 gh CLI，避免再引一个第三方 action 当供应链依赖。
+      - name: Delete older artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $repo = "${{ github.repository }}"
+
+          # 短 sha 重新算一遍：与 build job 用的是同一个 github.sha，结果必然一致。
+          $env:SHA_SHORT = "${{ github.sha }}".Substring(0, 7)
+
+          # 本次构建的三个包都算「当前」，都要留。名字必须与 build job 的 upload-artifact
+          # 完全一致，否则会把刚上传的产物当「旧的」删掉；cleanup 与 build 无法共享 matrix，
+          # 所以这里只能重写一遍 —— release job 的取用也依赖这套命名，改动时几处都要改。
+          if ([string]::IsNullOrWhiteSpace($env:SHA_SHORT)) {
+            throw "SHA_SHORT 为空，拒绝清理 —— 否则会把刚上传的产物全部误删"
+          }
+          $current = @(
+            "Vial-STG-ci-win-$env:SHA_SHORT",
+            "Vial-STG-ci-linux-$env:SHA_SHORT",
+            "Vial-STG-ci-mac-$env:SHA_SHORT"
+          )
+
+          $json = gh api "repos/$repo/actions/artifacts?per_page=100" | ConvertFrom-Json
+          $stale = @($json.artifacts | Where-Object { $_.name -notin $current })
+
+          if ($stale.Count -eq 0) {
+            Write-Host "没有需要清理的旧 artifact。"
+            exit 0
+          }
+
+          foreach ($a in $stale) {
+            Write-Host ("删除旧 artifact: {0} (id={1}, 创建于 {2})" -f $a.name, $a.id, $a.created_at)
+            gh api -X DELETE "repos/$repo/actions/artifacts/$($a.id)" | Out-Null
+          }
+          Write-Host ("已清理 {0} 个旧 artifact。" -f $stale.Count)

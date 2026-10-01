@@ -8,7 +8,7 @@ import lzma
 import os.path
 import struct
 
-from PyQt5.QtCore import QPoint
+from PyQt5.QtCore import QPoint, Qt
 from PyQt5.QtWidgets import QPushButton
 from pytestqt.qt_compat import qt_api
 
@@ -840,6 +840,31 @@ def test_analog_tab(qtbot):
     tab.poll()
     assert tab.track.travel == 128
     assert "500" in tab.lbl_raw.text()
+
+    # 行程调试模式：全键柱状图。开启后 poll() 一次 0xF3 全键帧(4 键 < 每包
+    # 10 条，单包即整帧)刷每个键；关闭后清掉覆盖层；选中键行程轨沿用全键帧。
+    vk.analog_cmd_log.clear()
+    vk.analog_readings[0] = (10, 300)
+    vk.analog_readings[1] = (30, 400)
+    vk.analog_readings[2] = (200, 500)
+    vk.analog_readings[3] = (255, 600)
+    tab.chk_debug.setChecked(True)
+    # 开关不可获得焦点：用户测试行程时会按空格，焦点落在复选框上会被空格误切换
+    assert tab.chk_debug.focusPolicy() == Qt.NoFocus
+    tab.poll()
+    assert tab._ki_widgets[0].travel == 10
+    assert tab._ki_widgets[1].travel == 30
+    assert tab._ki_widgets[2].travel == 200
+    assert tab._ki_widgets[3].travel == 255
+    assert tab._ki_widgets[3].travel_actuation == tab.configs[3].actuation_point
+    reads = [e for e in vk.analog_cmd_log if e[0] == CMD_VIAL_ANALOG_GET_KEY_READINGS]
+    assert reads == [(CMD_VIAL_ANALOG_GET_KEY_READINGS, 0)]  # 单包整帧，无逐键 0xF3
+    # 选中键行程轨沿用全键帧(当前选中键 2)
+    assert tab.track.travel == 200
+    # 关闭调试：覆盖层清空
+    tab.chk_debug.setChecked(False)
+    assert tab._ki_widgets[0].travel is None
+    assert tab._ki_widgets[2].travel is None
 
     # 单键重置：回全局组（OVERRIDE 清除），校准端点保留，UI 同步
     tab.do_reset_key()

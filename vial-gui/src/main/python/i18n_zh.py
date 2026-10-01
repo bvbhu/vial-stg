@@ -270,6 +270,7 @@ _RAW = {
     ("AnalogTab", "Release point"): "断开点",
     ("AnalogTab", "RT down sensitivity"): "RT 触发灵敏度",
     ("AnalogTab", "RT up sensitivity"): "RT 断开灵敏度",
+    ("AnalogTab", "Visualize all-key travel"): "可视化显示全键行程",
     ("AnalogTab", "Unlock the keyboard to show key presses:"): "解锁键盘以显示按键按下：",
     ("AnalogTab", "Write current values to keyboard EEPROM"): "将当前参数写入键盘 EEPROM",
     ("AnalogTab", "All values are saved"): "所有改动均已保存",

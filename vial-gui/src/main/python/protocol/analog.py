@@ -230,6 +230,35 @@ class ProtocolAnalog:
             readings.append((travel, raw))
         return readings
 
+    def analog_get_all_key_readings(self):
+        """全键实时行程：0xF3 从 ki=0 连续拉到 n=0。返回 {ki: (travel, raw)}。
+
+        行程调试模式(全键柱状图)用：每帧往返次数 = ceil(num_keys/max_readings)
+        (本板 80 键宽域 = 12 包/帧)。固件 0xF3 直接读 last_absv 缓存、
+        不触发 ADC 采样，帧率只受传输与 GUI 重绘限制。
+        任一 chunk 返回空(n=0 越界 / 空回包掉线)即终止，返回已读到的部分，
+        调用方按帧整体使用、失败时丢弃本帧。
+        """
+        num_keys = getattr(self, "_analog_num_keys", 0)
+        if num_keys <= 0:
+            return {}
+        max_readings = 0
+        caps = getattr(self, "_analog_caps", None)
+        if caps is not None:
+            max_readings = int(caps.get("max_readings", 0) or 0)
+        if max_readings <= 0:  # 未握手兜底：按窄域单包上限算(31 / 条目字节数)
+            max_readings = 31 // analog_reading_entry_size(self.analog_max_travel())
+        out = {}
+        start = 0
+        while start < num_keys:
+            chunk = self.analog_get_key_readings(start)
+            for i, (travel, raw) in enumerate(chunk):
+                out[start + i] = (travel, raw)
+            start += len(chunk)
+            if not chunk:
+                break
+        return out
+
     def analog_calibrate(self, mode, ki):
         """ki=0xFFFF 表示全部键。返回 (ok, sampled_raw)。"""
         data = self.usb_send(self.dev, struct.pack("<BBBH", CMD_VIA_VIAL_PREFIX, CMD_VIAL_ANALOG_CALIBRATE, mode, ki),

@@ -650,6 +650,13 @@ class AnalogTab(BasicEditor):
         for b in (self.btn_disp_act_rel, self.btn_disp_rt):
             b.setEnabled(False)
             disp_row.addWidget(b)
+        # 可视化显示全键行程：全键实时行程柱状图(纯 GUI 拉取，0xF3 批量读，零固件改动)。
+        # NoFocus：用户测试行程时会按空格，若本开关可获焦点会被空格误切换(关掉可视化)。
+        self.chk_debug = QCheckBox(tr("AnalogTab", "Visualize all-key travel"))
+        self.chk_debug.setFocusPolicy(Qt.NoFocus)
+        self.chk_debug.setEnabled(False)
+        self.chk_debug.toggled.connect(self._on_debug_toggled)
+        disp_row.addWidget(self.chk_debug)
         disp_row.addStretch()
         kbd_layout.addLayout(disp_row)
         kbd_layout.addWidget(self.container)
@@ -862,6 +869,8 @@ class AnalogTab(BasicEditor):
         self._clear_selection_ui()
         self.btn_disp_act_rel.setEnabled(False)
         self.btn_disp_rt.setEnabled(False)
+        self.chk_debug.setEnabled(False)
+        self._clear_travel_bars()
         if device is None or device.keyboard is None:
             self.container.setEnabled(False)
             self._force_bottom_out_off()
@@ -910,6 +919,7 @@ class AnalogTab(BasicEditor):
         self.container.setEnabled(True)
         self.btn_disp_act_rel.setEnabled(True)
         self.btn_disp_rt.setEnabled(True)
+        self.chk_debug.setEnabled(True)
         self._show_global_mode()
         # 设备在行程页激活期间发生变更(热插拔/刷新)：rebuild 顶部停了 timer，
         # 这里按激活态恢复，否则要切走再切回标签高亮才恢复
@@ -1282,7 +1292,11 @@ class AnalogTab(BasicEditor):
             return
         # ① 矩阵按下高亮：与是否选键无关，每轮都刷
         self._poll_matrix()
-        # ② 选中键的实时行程读数（analog 命令不受 unlock 门控，照常轮询）
+        # ② 可视化显示全键行程：全键实时行程柱状图(每帧约 num_keys/max_readings 个往返)
+        if self.chk_debug.isChecked():
+            self._poll_all_travel()
+            return
+        # ③ 选中键的实时行程读数（analog 命令不受 unlock 门控，照常轮询）
         if self.selected is None or self.selected >= self.num_keys:
             return
         try:
@@ -1296,6 +1310,58 @@ class AnalogTab(BasicEditor):
             rest = cfg.raw_rest if cfg is not None else None
             full = cfg.raw_full if cfg is not None else None
             self._set_readings(raw, rest, full)
+
+    def _poll_all_travel(self):
+        """可视化显示全键行程：拉全键行程，刷新每个键的柱状图覆盖层。
+
+        固件 0xF3 直接读 last_absv 缓存、不触发 ADC 采样；本板 80 键宽域
+        一帧 12 个 32B 往返。任一 chunk 失败即放弃本帧(保留上一帧显示)——
+        掉线时整帧逐 chunk 重试会卡死 GUI 线程，故不重试、失败即弃帧。
+        选中键的行程轨/读数沿用本帧数据，不再单独发 0xF3。
+        """
+        if self.device is None or self.caps is None:
+            return
+        try:
+            frame = self.device.keyboard.analog_get_all_key_readings()
+        except Exception:
+            return
+        changed = False
+        for ki, w in self._ki_widgets.items():
+            item = frame.get(ki)
+            if item is None:
+                continue
+            travel, _raw = item
+            cfg = self.configs.get(ki)
+            act = cfg.actuation_point if cfg is not None else None
+            if act is None and self._global_cfg is not None:
+                act = self._global_cfg.actuation_point
+            if act is None:
+                act = max(1, self.max_travel // 2)
+            if w.set_travel(travel, self.max_travel, act):
+                changed = True
+        if changed:
+            self.container.update()
+        if self.selected is not None and self.selected in frame:
+            travel, raw = frame[self.selected]
+            self.track.set_travel(travel)
+            cfg = self.configs.get(self.selected)
+            rest = cfg.raw_rest if cfg is not None else None
+            full = cfg.raw_full if cfg is not None else None
+            self._set_readings(raw, rest, full)
+
+    def _clear_travel_bars(self):
+        """清掉所有键的行程覆盖层(关闭调试/设备变更/断开时调用)。"""
+        changed = False
+        for w in self._ki_widgets.values():
+            if w.set_travel(None, 0, 0):
+                changed = True
+        if changed:
+            self.container.update()
+
+    def _on_debug_toggled(self, on):
+        """行程调试开关：关闭时清掉残留的柱状图覆盖层(打开时由轮询填充)。"""
+        if not on:
+            self._clear_travel_bars()
 
     def _poll_matrix(self):
         """轮询整张矩阵按下态：正在按的键渲染成蓝(主题 Highlight)，松开即回普通色。
