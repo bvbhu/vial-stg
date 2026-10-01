@@ -7,3 +7,6 @@ vial-gui/*.vil
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# 本地 Python 虚拟环境 (Vial GUI 用, 见 docs/run-vial-gui.txt)
+.venv-vial-gui/
