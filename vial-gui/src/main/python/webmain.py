@@ -44,27 +44,12 @@ class UncaughtHook(QtCore.QObject):
         if issubclass(exc_type, KeyboardInterrupt):
             # ignore keyboard interrupt to support console applications
             sys.__excepthook__(exc_type, exc_value, exc_traceback)
-            return
+        else:
+            log_msg = '\n'.join([''.join(traceback.format_tb(exc_traceback)),
+                                 '{0}: {1}'.format(exc_type.__name__, exc_value)])
 
-        if issubclass(exc_type, RuntimeError) and "failed to communicate" in str(exc_value):
-            # 通信失联（设备切无线/拔线后命令无响应）：预期场景而非缺陷，
-            # 不弹窗、不打印无意义堆栈——转成"设备已断开"的常规处理
-            # （与桌面端 main.py 同一语义）。Web 端单线程，autorefresh 线程
-            # 不启动，handle_comm_failure 只做同步的"清空当前设备 + 拉黑 +
-            # 刷新列表"，不依赖后台探测。
-            print("webmain: communication failure intercepted: %s" % exc_value)
-            try:
-                from autorefresh.autorefresh import handle_comm_failure
-                handle_comm_failure()
-            except Exception:
-                print("webmain: handle_comm_failure failed")
-            return
-
-        log_msg = '\n'.join([''.join(traceback.format_tb(exc_traceback)),
-                             '{0}: {1}'.format(exc_type.__name__, exc_value)])
-
-        # trigger message box show
-        self._exception_caught.emit(log_msg)
+            # trigger message box show
+            self._exception_caught.emit(log_msg)
         sys._excepthook(exc_type, exc_value, exc_traceback)
 
 
