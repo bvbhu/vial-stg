@@ -108,8 +108,13 @@ class Unlocker(QDialog):
 
     @classmethod
     def unlock(cls, keyboard):
-        if keyboard.get_unlock_status() == 1:
-            return True
+        try:
+            if keyboard.get_unlock_status() == 1:
+                return True
+        except RuntimeError:
+            # 设备失联（切蓝牙/拔线后命令无响应）：不弹窗、不崩溃，
+            # 返回 False 让调用方放弃本次写操作；设备由全局刷新流程拉黑移除。
+            return False
 
         cls.dlg_retval = None
         dlg = cls(cls.global_layout_editor, keyboard)

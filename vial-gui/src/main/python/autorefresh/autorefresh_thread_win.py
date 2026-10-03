@@ -56,6 +56,11 @@ class AutorefreshThreadWin(AutorefreshThread):
                 win32gui.PumpWaitingMessages()
                 time.sleep(0.01)
 
+            # 低频刷新（约 1s）：update() 内含 scan_comm_dead + 黑名单复活探测。
+            # 设备切蓝牙后 USB 枚举仍在、无 WM_DEVICECHANGE 事件，靠这里的刷新把
+            # comm_dead 设备拉黑（列表消失）；探测只碰黑名单设备，不与 UI 争端点。
+            self.update()
+
             if g_device_changes > 0:
                 g_device_changes = 0
                 self.update()

@@ -44,7 +44,7 @@ from protocol.constants import (ANALOG_AXIS_NONE, ANALOG_FLAG_RT_ENABLED,
                                 ANALOG_CAL_BOTTOM_OUT_ON, ANALOG_CAL_BOTTOM_OUT_OFF,
                                 ANALOG_CAP_BOTTOM_OUT_CAL,
                                 ANALOG_PROTOCOL_VERSION)
-from protocol.analog import AnalogKeyConfig, ANALOG_DEFAULT_MAX_TRAVEL
+from protocol.analog import AnalogKeyConfig, ANALOG_DEFAULT_MAX_TRAVEL, analog_reading_entry_size
 from unlocker import Unlocker
 
 
@@ -364,6 +364,13 @@ class TravelProgressBar(QWidget):
         # 两个阈值常只差几个刻度(如 192/200 仅 8px)，15px 的手柄会叠在一起分不清：
         # 重叠时以轨道线为界左右各让一个身位，y 仍严格等于各自的值
         overlap = abs(y_act - y_rel) < hh + 1
+        # 标注矩形宽度按字体实测（L-14）：固定 80px 在英文模式("Actuation point" ≈
+        # 112px)会截断，中文("触发点")又余量过大。按两行(名称/数值)中最宽串定宽。
+        fm = QFontMetrics(qp.font())
+        label_w = 80
+        for name, v in (("rel", self.release), ("act", self.actuation)):
+            label = tr("AnalogTab", "Release point") if name == "rel" else tr("AnalogTab", "Actuation point")
+            label_w = max(label_w, fm.horizontalAdvance(label), fm.horizontalAdvance(str(v)))
         for name, v, ly in (("rel", self.release, ly_rel), ("act", self.actuation, ly_act)):
             y = self._y_of(v)
             if not overlap:
@@ -373,9 +380,8 @@ class TravelProgressBar(QWidget):
             else:
                 cx = self._TRACK_X + 2
             self._draw_handle(qp, cx, y, self._drag == name)
-            label = tr("AnalogTab", "Release point") if name == "rel" else tr("AnalogTab", "Actuation point")
             qp.setPen(text_color)
-            qp.drawText(QRect(self._LABEL_X, int(ly) - self._LABEL_BLOCK // 2, 80, self._LABEL_BLOCK),
+            qp.drawText(QRect(self._LABEL_X, int(ly) - self._LABEL_BLOCK // 2, label_w, self._LABEL_BLOCK),
                         Qt.AlignLeft | Qt.AlignVCenter,
                         "{}\n{}".format(label, v))
 
@@ -612,8 +618,10 @@ class AnalogTab(BasicEditor):
         self._display_mode = "act_rel"  # "act_rel"=触发/断开，"rt"=RT 灵敏度
 
         self._timer = QTimer()
-        self._timer.setInterval(20)
         self._timer.timeout.connect(self.poll)
+        self._poll_interval = None        # 轮询间隔(ms)缓存：由 _apply_poll_interval 按键数/行程域算出
+        self._travel_next_at = 0.0        # monotonic 时刻：行程/全键读取下一次放行（0=立即可读）
+        self._comm_backoff_until = 0.0    # monotonic 时刻：通信冷却期内完全不访问设备（矩阵+行程）
 
         self._flush_timer = QTimer()
         self._flush_timer.setSingleShot(True)
@@ -830,6 +838,47 @@ class AnalogTab(BasicEditor):
         chk.blockSignals(False)
 
     # ------------------------------------------------------------ interface
+    _POLL_INTERVAL_NORMAL = 20    # 常规轮询间隔(ms)：单键行程 + 矩阵高亮
+    # 全键行程可视化每帧往返数 ≈ ceil(num_keys / max_readings)。往返数越多，单帧越重，
+    # 轮询周期应随之放长，否则键数翻倍时帧率翻倍、卡顿预算同倍恶化。
+    # 卡顿预算按“每秒往返数”定死（而非帧率）：本板 80 键宽域 = 12 往返/帧，
+    # 基准 20ms 帧周期 ≈ 25 往返/秒。键数增加（或窄域条目变多）时帧周期自动放长，
+    # 每秒往返数维持预算；反之键数减少时帧率回升。
+    _POLL_BUDGET_ROUNDTRIPS_PER_SEC = 40  # 全键行程可视化每秒往返数上限（≈2.5fps @ 80键宽域 / 2fps @ 100键宽域）
+    _POLL_BACKOFF_MS = 200        # 一次读取失败后的通信冷却(ms)：冷却期内完全不访问设备（矩阵+行程），掉线阻塞稀疏化
+
+    @staticmethod
+    def _poll_all_travel_frame_roundtrips(num_keys, max_readings, max_travel):
+        """全键行程可视化一帧的往返数：ceil(num_keys / max_readings)；
+        未握手拿不到 max_readings 时按窄域单包上限(31/条目字节)兜底。"""
+        if max_readings <= 0:
+            max_readings = 31 // analog_reading_entry_size(max_travel)
+        return (num_keys + max_readings - 1) // max_readings
+
+    def _apply_poll_interval(self):
+        """按当前负载算出轮询间隔，套到 _timer 上。
+
+        全键行程可视化模式：每秒往返数受 _POLL_BUDGET_ROUNDTRIPS_PER_SEC 限制
+        （键数/行程域宽度共同决定单帧往返数）；普通模式（单键行程 +
+        矩阵高亮 = 每帧 2 个往返）回到 _POLL_INTERVAL_NORMAL。
+        由重建/开关可视化时调用。
+        """
+        if self.caps is None:
+            return
+        if self.chk_debug.isChecked():
+            trips = self._poll_all_travel_frame_roundtrips(
+                self.num_keys, int(self.caps.get("max_readings", 0) or 0), self.max_travel)
+            interval = max(self._POLL_INTERVAL_NORMAL,
+                           int(round(trips * 1000.0 / self._POLL_BUDGET_ROUNDTRIPS_PER_SEC)))
+        else:
+            interval = self._POLL_INTERVAL_NORMAL
+        self._set_poll_interval(interval)
+
+    def _set_poll_interval(self, interval):
+        if interval != self._poll_interval:
+            self._poll_interval = interval
+            self._timer.setInterval(interval)
+
     def _apply_max_travel(self, max_travel):
         """把固件上报的行程域最大键程值铺给所有以"行程"为单位的控件。
 
@@ -904,6 +953,8 @@ class AnalogTab(BasicEditor):
         self.num_keys = caps["num_keys"]
         # 行程域宽度由固件决定，所有行程量纲的控件据此重设量程
         self._apply_max_travel(caps["max_travel"])
+        # 键数/行程域已知：按负载重算轮询间隔（全键行程可视化打开时生效）
+        self._apply_poll_interval()
         # 保存语义：0xF2 仅写 RAM，0xF6 显式落 EEPROM
         self._save_supported = True
         self._update_save_state()
@@ -924,12 +975,14 @@ class AnalogTab(BasicEditor):
         # 设备在行程页激活期间发生变更(热插拔/刷新)：rebuild 顶部停了 timer，
         # 这里按激活态恢复，否则要切走再切回标签高亮才恢复
         if self._active:
+            self._apply_poll_interval()
             self._timer.start()
 
     def activate(self):
         self._active = True
         # 计时器只要本标签激活且固件支持 analog 就跑：矩阵按下高亮与是否选键无关
         if self.caps is not None:
+            self._apply_poll_interval()
             self._timer.start()
             if self.selected is not None:
                 self._render_selected_keycode()
@@ -999,8 +1052,15 @@ class AnalogTab(BasicEditor):
             try:
                 self.configs[ki] = self.device.keyboard.analog_get_key_config(ki, retries=3)
             except Exception:
+                # 读失败即中止整批（L-11）：连读都读不到说明设备已失联/固件卡死，
+                # 剩下的键再逐键 retries=3 只会白白阻塞 GUI 线程。
+                # 失败点之后没尝试的键不进 _unread_keys——0xF6 落盘的是固件 RAM，
+                # GUI 从未写过它们，真实值原样提交，不存在被占位值覆盖的风险；
+                # 需要时（点选该键）走 on_key_clicked 现场补读。
+                # 只有失败点本身记 _unread_keys：它的 RAM 状态未知，保存前必须拦住。
                 self.configs[ki] = AnalogKeyConfig()
                 unread.append(ki)
+                break
         self._all_configs_loaded = True
         self._unread_keys = set(unread)
         if unread:
@@ -1290,18 +1350,36 @@ class AnalogTab(BasicEditor):
     def poll(self):
         if self.device is None or self.caps is None:
             return
-        # ① 矩阵按下高亮：与是否选键无关，每轮都刷
-        self._poll_matrix()
+        # 通信冷却期：上一次访问设备失败后暂时完全不去碰它（矩阵高亮维持上一帧）。
+        # 掉线时每次 usb 尝试最坏阻塞 ~350ms（retries=3 × 100ms 超时），若每 20ms
+        # 都触发一次，UI 线程会被连续压死；冷却期把"阻塞尝试"压到每 ~200ms 一次，
+        # 中间只跑纯本地绘制（零阻塞）。计时器仍保持 20ms，只是冷却期内不访问设备。
+        if time.monotonic() < self._comm_backoff_until:
+            return
+        # ① 矩阵按下高亮：与是否选键无关，每轮都刷（成功即本帧继续）
+        if not self._poll_matrix():
+            return  # 矩阵访问失败：已进入通信冷却，本轮到此为止
         # ② 可视化显示全键行程：全键实时行程柱状图(每帧约 num_keys/max_readings 个往返)
         if self.chk_debug.isChecked():
-            self._poll_all_travel()
+            if not self._travel_poll_due():
+                return  # 全键帧按往返预算节流，未到点则本轮只做矩阵高亮
+            try:
+                frame = self.device.keyboard.analog_get_all_key_readings()
+            except Exception:
+                self._note_travel_failure()
+                return
+            self._note_travel_success()
+            self._poll_all_travel_apply(frame)
             return
-        # ③ 选中键的实时行程读数（analog 命令不受 unlock 门控，照常轮询）
+        # ③ 选中键的实时行程读数（analog 命令不受 unlock 门控，照常轮询）。
+        # 普通模式单键读取每帧仅 1-2 个往返，20ms tick 驱动即可，无需额外节流
+        # （行程跟手优先；掉线重试已由通信冷却兜住）。
         if self.selected is None or self.selected >= self.num_keys:
             return
         try:
             readings = self.device.keyboard.analog_get_key_readings(self.selected)
         except Exception:
+            self._note_travel_failure()
             return
         if readings:
             travel, raw = readings[0]
@@ -1311,20 +1389,45 @@ class AnalogTab(BasicEditor):
             full = cfg.raw_full if cfg is not None else None
             self._set_readings(raw, rest, full)
 
-    def _poll_all_travel(self):
-        """可视化显示全键行程：拉全键行程，刷新每个键的柱状图覆盖层。
+    def _travel_poll_due(self):
+        """全键行程可视化模式：是否到了下一帧的节流时刻。
+
+        全键帧一帧 N 个往返（N=ceil(num_keys/max_readings)），秒级往返总量受
+        _POLL_BUDGET_ROUNDTRIPS_PER_SEC 限制，帧周期 = N×1000/预算 ms。矩阵
+        高亮不受此节流（20ms 独立 tick）。普通模式的单键行程读取不走本闸门。
+        """
+        return time.monotonic() >= self._travel_next_at
+
+    def _note_travel_success(self):
+        """一次全键帧读取成功：按当前往返预算排下一帧。"""
+        interval = max(1, (self._poll_interval or self._POLL_INTERVAL_NORMAL))
+        self._travel_next_at = time.monotonic() + interval / 1000.0
+
+    def _note_travel_failure(self):
+        """一次行程读取失败（异常）：进入通信冷却（弹窗由 autorefresh 拉黑时统一触发）。"""
+        self._enter_comm_backoff()
+
+    def _enter_comm_backoff(self):
+        """进入通信冷却：_POLL_BACKOFF_MS 内完全不访问设备（矩阵+行程都停）。
+
+        掉线的设备每次 usb 尝试都阻塞 ~350ms，冷却期保证这类阻塞尝试稀疏化；
+        冷却一过立即允许重试（_travel_next_at 归零），恢复后首个 20ms tick 就能
+        读到数据。
+
+        「键盘无响应」提示不在这里弹——它由 autorefresh 在设备被判 comm_dead
+        （随刷新从列表消失）的同一时刻经主窗口弹出（main_window.on_device_comm_dead），
+        保证与「设备无响应的刷新」同时出现。
+        """
+        self._comm_backoff_until = time.monotonic() + self._POLL_BACKOFF_MS / 1000.0
+        self._travel_next_at = 0.0
+
+    def _poll_all_travel_apply(self, frame):
+        """把一帧全键行程应用到各键柱状图覆盖层 + 选中键行程轨/读数。
 
         固件 0xF3 直接读 last_absv 缓存、不触发 ADC 采样；本板 80 键宽域
-        一帧 12 个 32B 往返。任一 chunk 失败即放弃本帧(保留上一帧显示)——
-        掉线时整帧逐 chunk 重试会卡死 GUI 线程，故不重试、失败即弃帧。
-        选中键的行程轨/读数沿用本帧数据，不再单独发 0xF3。
+        一帧 12 个 32B 往返（往返预算由 _apply_poll_interval 折进帧周期）。
+        帧获取失败（异常）在 poll() 里已弃帧并进通信冷却，本方法只负责应用。
         """
-        if self.device is None or self.caps is None:
-            return
-        try:
-            frame = self.device.keyboard.analog_get_all_key_readings()
-        except Exception:
-            return
         changed = False
         for ki, w in self._ki_widgets.items():
             item = frame.get(ki)
@@ -1359,7 +1462,9 @@ class AnalogTab(BasicEditor):
             self.container.update()
 
     def _on_debug_toggled(self, on):
-        """行程调试开关：关闭时清掉残留的柱状图覆盖层(打开时由轮询填充)。"""
+        """行程调试开关：关闭时清掉残留的柱状图覆盖层(打开时由轮询填充)；
+        开关切换会成倍改变单帧负载，同步重算轮询间隔。"""
+        self._apply_poll_interval()
         if not on:
             self._clear_travel_bars()
 
@@ -1376,30 +1481,35 @@ class AnalogTab(BasicEditor):
         解锁态按 1 Hz 查询而不是每轮 50 次：该值在一次连接里几乎不变（本固件恒 1），
         而这条协议要跑在蓝牙空口上，省下的是实打实的带宽。用户点 Unlock 后由
         unlock() 主动作废缓存，无需等下一个周期。
+
+        返回 True=本帧矩阵数据已成功取得（可继续同一帧的行程读取）；
+        False=访问失败（已进入通信冷却，本轮到此为止）。
         """
         if self.keyboard is None:
-            return
+            return True
         now = time.monotonic()
         if self._unlock_state is None or now - self._unlock_checked >= 1.0:
             try:
                 self._unlock_state = self.keyboard.get_unlock_status(3)
             except (RuntimeError, ValueError):
-                return
+                self._enter_comm_backoff()
+                return False
             self._unlock_checked = now
         if not self._unlock_state:
             self._reset_press()
             self.unlock_lbl.show()
             self.unlock_btn.show()
-            return
+            return True
         self.unlock_lbl.hide()
         self.unlock_btn.hide()
 
         try:
             data = self.keyboard.matrix_poll()
         except (RuntimeError, ValueError):
-            return
+            self._enter_comm_backoff()
+            return False
         if not data or len(data) < 2:
-            return
+            return True
         row_size = (self.cols + 7) // 8
         changed = False
         for w in self.container.widgets:
@@ -1418,6 +1528,7 @@ class AnalogTab(BasicEditor):
         if self.selected is not None:
             sel = self._ki_widgets.get(self.selected)
             self.keycap.set_pressed(bool(sel is not None and sel.pressed))
+        return True
 
     def _reset_press(self):
         """清掉所有键的按下高亮（锁定时调用，避免残留蓝色）。"""

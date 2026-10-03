@@ -51,14 +51,17 @@ def hid_send(dev, msg, retries=1):
     while retries > 0:
         retries -= 1
         if not first:
-            time.sleep(0.5)
+            # 重试等待从 0.5s 大幅缩短：本函数在 Qt 主线程执行，
+            # 设备无响应（如切蓝牙后固件把 raw HID 回包切走）时，
+            # 长 sleep 会饿死事件循环，表现为 GUI"未响应/卡死"。
+            time.sleep(0.05)
         first = False
         try:
             # add 00 at start for hidapi report id
             if dev.write(b"\x00" + msg) != MSG_LEN + 1:
                 continue
 
-            data = bytes(dev.read(MSG_LEN, timeout_ms=500))
+            data = bytes(dev.read(MSG_LEN, timeout_ms=100))
             if not data:
                 continue
         except OSError:

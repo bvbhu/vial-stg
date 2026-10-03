@@ -2,6 +2,7 @@
 import struct
 import json
 import lzma
+import time
 from collections import OrderedDict
 
 from keycodes.keycodes import RESET_KEYCODE, Keycode, recreate_keyboard_keycodes
@@ -39,8 +40,16 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
 
     def __init__(self, dev, usb_send=hid_send):
         self.dev = dev
-        self.usb_send = usb_send
         self.definition = None
+
+        # 通信失效检测：usb_send 连续失败达到阈值即判定设备"已断开"（如切蓝牙后
+        # 固件对 USB raw HID 回包不再响应——枚举仍在但命令无回包）。成功即清零。
+        # comm_dead 仅供 UI 层读取（autorefresh 用它过滤设备列表做黑名单）。
+        self._comm_failures = 0
+        self.comm_dead = False
+        self._comm_failures_threshold = 3
+        self._comm_success_clear = True
+        self.usb_send = self._make_usb_send_wrapper(usb_send)
 
         # n.b. using OrderedDict here to make order of layout requests consistent for tests
         self.rowcol = OrderedDict()
@@ -70,6 +79,31 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
         self.rgb_supported_effects = set()
 
         self.via_protocol = self.vial_protocol = self.keyboard_id = -1
+
+    def _make_usb_send_wrapper(self, usb_send):
+        """包一层 usb_send：失败累计、成功清零，达到阈值标记 comm_dead。
+
+        探测恢复（UI 层对被判死的设备低频发 get_unlock_status）走同一个 wrapper：
+        探测成功即清零计数并清除 comm_dead，设备自动"复活"。
+        """
+        def wrapped(*args, **kwargs):
+            try:
+                data = usb_send(*args, **kwargs)
+            except Exception:
+                self._comm_failures += 1
+                if self._comm_failures >= self._comm_failures_threshold:
+                    self.comm_dead = True
+                raise
+            if self._comm_success_clear:
+                self._comm_failures = 0
+                self.comm_dead = False
+            return data
+        return wrapped
+
+    def reset_comm_state(self):
+        """手动清零通信失效状态（探测外部判定复活时用）。"""
+        self._comm_failures = 0
+        self.comm_dead = False
 
     def reload(self, sideload_json=None):
         """ Load information about the keyboard: number of layers, physical key layout """

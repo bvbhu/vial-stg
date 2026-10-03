@@ -290,6 +290,14 @@ _RAW = {
     ("AnalogTab", "Key display:"): "键面显示：",
     ("AnalogTab", "Act/Rel"): "触发/断开",
     ("AnalogTab", "RT"): "RT",
+    # 「键盘无响应」提示：挂在设备被判 comm_dead（随刷新从列表消失）的同一时刻，
+    # 由主窗口弹出（MainWindow 上下文）。
+    ("MainWindow", "Keyboard is not responding"): "键盘无响应",
+    ("MainWindow", "The keyboard did not respond to the last few queries. "
+                   "If you switched it to wireless mode this is normal. "
+                   "Avoid switching wireless mode while Vial is connected."):
+        "键盘未响应最近的请求。\n如果已切换到无线模式，这是正常现象。\n"
+        "连接 Vial 期间请勿切换无线模式。",
 }
 
 

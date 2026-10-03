@@ -177,6 +177,11 @@ class MacroRecorder(BasicEditor):
         self.on_change()
 
     def on_save(self):
-        Unlocker.unlock(self.device.keyboard)
-        self.keyboard.set_macro(self.serialize())
+        try:
+            Unlocker.unlock(self.device.keyboard)
+            self.keyboard.set_macro(self.serialize())
+        except RuntimeError:
+            # 设备失联（切蓝牙/拔线后命令无响应）：放弃本次保存，
+            # 由全局刷新流程把设备拉黑并从列表移除，不崩溃。
+            return
         self.on_change()

@@ -139,6 +139,9 @@ class MainWindow(QMainWindow):
 
         self.autorefresh = Autorefresh()
         self.autorefresh.devices_updated.connect(self.on_devices_updated)
+        # 设备被判 comm_dead（拉黑）→ 弹「键盘无响应」提示；信号在刷新完成后
+        # 发出，弹窗与「设备无响应的刷新」同步且不会被刷新流程盖掉。
+        self.autorefresh.comm_dead_now.connect(self.on_device_comm_dead)
 
         # cache for via definition files
         self.cache_path = QStandardPaths.writableLocation(QStandardPaths.CacheLocation)
@@ -310,6 +313,26 @@ class MainWindow(QMainWindow):
     def on_click_refresh(self):
         self.autorefresh.update(quiet=False, hard=True)
 
+    def on_device_comm_dead(self):
+        """设备被判通信失效（已随刷新从列表消失）→ 弹「键盘无响应」非模态提示。
+
+        在 autorefresh 完成刷新**之后**触发（comm_dead_now 在 update()/mark_dead()
+        末尾发出），弹窗不会被刷新流程盖掉。仅提示、不接管流程：设备已从列表
+        消失，autorefresh 会低频探测复活。切到无线模式属正常现象，提示里写明，
+        避免用户误以为设备损坏。
+        弹窗框必须存实例引用（self._comm_dead_box）：非模态框方法返回后若无
+        引用，Python GC 会把它回收销毁——表现为"一闪而过"。
+        """
+        self._comm_dead_box = QMessageBox(
+            QMessageBox.Warning,
+            tr("MainWindow", "Keyboard is not responding"),
+            tr("MainWindow", "The keyboard did not respond to the last few queries. "
+                            "If you switched it to wireless mode this is normal. "
+                            "Avoid switching wireless mode while Vial is connected."),
+            QMessageBox.Ok, self)
+        self._comm_dead_box.setWindowModality(Qt.NonModal)
+        self._comm_dead_box.show()
+
     def on_devices_updated(self, devices, hard_refresh):
         self.combobox_devices.blockSignals(True)
 
@@ -337,6 +360,11 @@ class MainWindow(QMainWindow):
         except ProtocolError:
             QMessageBox.warning(self, "", "Unsupported protocol version!\n"
                                           "Please download latest {} from {}".format(APP_NAME, REPO_URL))
+        except RuntimeError:
+            # 设备打开/通信失败（已切走、拔线、固件无响应）：select_device 已回退
+            # 到无设备状态。这里静默忽略——autorefresh 心跳会在设备恢复后自动重列，
+            # 弹窗只会打扰用户。
+            logging.warning("Failed to open selected device", exc_info=True)
 
         if isinstance(self.autorefresh.current_device, VialKeyboard):
             keyboard_id = self.autorefresh.current_device.keyboard.keyboard_id

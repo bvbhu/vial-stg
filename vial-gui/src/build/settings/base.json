@@ -5,5 +5,5 @@
     "url": "https://github.com/bvbhu/vial-stg",
     "author_email": "",
     "main_module": "src/main/python/main.py",
-    "version": "0.7.5"
+    "version": "1.0.0"
 }

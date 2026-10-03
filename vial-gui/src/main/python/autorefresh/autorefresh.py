@@ -1,6 +1,46 @@
+import logging
 import sys
 
 from PyQt5.QtCore import QObject, pyqtSignal
+
+# 通信失联统一处理的重入保护：mark_dead → update → on_device_selected 链中
+# 若再次发生通信异常，避免递归进入本处理。
+_comm_failure_handling = False
+
+
+def handle_comm_failure():
+    """通信失联统一兜底：拉黑当前设备并触发刷新（崩溃拦截用）。
+
+    设备切蓝牙/拔线后，UI 槽内任何 usb_send 都会快速失败（100ms 超时）并抛
+    RuntimeError。本函数把它转成"设备已断开"的常规处理：拉黑 + 刷新列表 +
+    回退到无设备状态，而不是让异常冒泡导致 PyQt5 中止进程。
+    """
+    global _comm_failure_handling
+    if _comm_failure_handling:
+        return
+    _comm_failure_handling = True
+    try:
+        inst = Autorefresh.instance
+        if inst is None or inst.current_device is None:
+            return
+        path = inst.current_device.desc.get("path")
+        try:
+            inst.current_device.close()
+        except Exception:
+            pass
+        inst.current_device = None
+        try:
+            # 同步清掉后台线程的 current_device 引用，避免探测/扫描碰已关闭设备
+            inst.thread.set_device(None)
+        except Exception:
+            pass
+        if path is not None:
+            try:
+                inst.thread.mark_dead(path)
+            except Exception:
+                pass
+    finally:
+        _comm_failure_handling = False
 
 
 class AutorefreshLocker:
@@ -19,6 +59,8 @@ class Autorefresh(QObject):
 
     instance = None
     devices_updated = pyqtSignal(object, bool)
+    # 透传后台线程的 comm_dead_now：本次刷新有新设备被判死（拉黑）时发出。
+    comm_dead_now = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -42,6 +84,7 @@ class Autorefresh(QObject):
             self.thread = AutorefreshThread()
 
         self.thread.devices_updated.connect(self.on_devices_updated)
+        self.thread.comm_dead_now.connect(self.comm_dead_now)
         self.thread.start()
 
     def _lock(self):
@@ -71,12 +114,29 @@ class Autorefresh(QObject):
             self.current_device = self.devices[idx]
 
         if self.current_device is not None:
-            if self.current_device.sideload:
-                self.current_device.open(self.thread.sideload_json)
-            elif self.current_device.via_stack:
-                self.current_device.open(self.thread.via_stack_json["definitions"][self.current_device.via_id])
-            else:
-                self.current_device.open(None)
+            try:
+                if self.current_device.sideload:
+                    self.current_device.open(self.thread.sideload_json)
+                elif self.current_device.via_stack:
+                    self.current_device.open(self.thread.via_stack_json["definitions"][self.current_device.via_id])
+                else:
+                    self.current_device.open(None)
+            except Exception:
+                # 打开/通信失败（设备已切走、拔线或固件无响应）：放弃该设备，
+                # 回退到"无设备"状态，避免半开实例残留导致后续 rebuild 二次异常。
+                dead_path = None
+                try:
+                    if self.current_device is not None:
+                        dead_path = self.current_device.desc["path"]
+                        self.current_device.close()
+                except Exception:
+                    dead_path = None
+                self.current_device = None
+                if dead_path is not None:
+                    # 打开失败就是"已失联"的明确证据：立即拉黑并刷新列表，
+                    # 让设备从下拉框即时消失（不等心跳累计 3 次失败）。
+                    self.thread.mark_dead(dead_path)
+                raise
         self.thread.set_device(self.current_device)
 
     def on_devices_updated(self, devices, changed):
