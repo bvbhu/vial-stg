@@ -115,6 +115,19 @@ class Autorefresh(QObject):
             self.current_device = self.devices[idx]
 
         if self.current_device is not None:
+            # 黑名单里的设备不再尝试打开：它刚被判死（打开失败/无响应），此刻
+            # 再开一次必然同样失败，而失败分支又会触发 mark_dead + 硬刷新，
+            # 形成"刷新 → 打开失败 → 刷新"的同步递归。设备在下次刷新探测成功
+            # 复活后才会重新出现在 devices 里（届时不在黑名单，正常打开）。
+            try:
+                path = self.current_device.desc["path"]
+            except Exception:
+                path = None
+            if path is not None and path in self.thread.dead_paths:
+                logging.info("Skipping open of blacklisted device %s", path)
+                self.current_device = None
+                self.thread.set_device(None)
+                return
             try:
                 if self.current_device.sideload:
                     self.current_device.open(self.thread.sideload_json)
@@ -136,6 +149,7 @@ class Autorefresh(QObject):
                 if dead_path is not None:
                     # 打开失败就是"已失联"的明确证据：立即拉黑并刷新列表，
                     # 让设备从下拉框即时消失（不等心跳累计 3 次失败）。
+                    # mark_dead 自带重入闸门，其触发的刷新不会再回到本函数。
                     self.thread.mark_dead(dead_path)
                 raise
         self.thread.set_device(self.current_device)

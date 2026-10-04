@@ -55,6 +55,9 @@ class AutorefreshThread(QThread):
         # 移除；UI 活跃期间后台探测让路，失联改由 UI 线程失败累计识别）。
         self.dead_paths = set()
         self.dead_failures = {}
+        # 判死链重入闸门：mark_dead → update → devices_updated →（UI 硬刷新）
+        # → select_device → mark_dead 的同步递归只允许进入一次（见 mark_dead）。
+        self._in_mark_dead = False
 
     def run(self):
         # 后台不再做周期心跳探测：探测只在 update()（刷新）时进行，
@@ -114,10 +117,26 @@ class AutorefreshThread(QThread):
         而不是等心跳累计 3 次失败。
         首次把设备拉黑后先触发硬刷新，**刷新完成后**才发 comm_dead_now
         （弹窗时机 = 设备无响应的刷新之后，不会被刷新流程盖掉）。
+
+        递归防线：本方法由 select_device 的失败分支调用，而它内部的 update()
+        会发 devices_updated，UI 侧收到硬刷新又回头调 select_device。若那条链
+        再次打开同一个（仍然打不开的）设备，就会形成
+            select_device → mark_dead → update → devices_updated
+              → on_device_selected → select_device → ...
+        的同步无限递归——不在设备枚举上，也不在任何单点阻塞上，表现为"启动后
+        无窗口且永不返回"。_in_mark_dead 保证在整条 mark_dead 链（含其触发的
+        刷新与 UI 回调）内只进入一次。
         """
-        if self._record_probe_result(path, path, False, blacklist_now=True):
-            self.update(hard=True)
-            self.comm_dead_now.emit()
+        if self._in_mark_dead:
+            # 已经在处理一次判死：拉黑状态已落库，递归层直接返回等待外层收尾。
+            return
+        self._in_mark_dead = True
+        try:
+            if self._record_probe_result(path, path, False, blacklist_now=True):
+                self.update(hard=True)
+                self.comm_dead_now.emit()
+        finally:
+            self._in_mark_dead = False
 
     def _probe_devices(self):
         """刷新时的黑名单复活探测：决定哪些设备可以回到可用列表。

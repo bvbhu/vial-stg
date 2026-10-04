@@ -292,7 +292,6 @@ class TestAutorefreshDeadFilter(unittest.TestCase):
         thread = at.AutorefreshThread()
         path = b"/path/revived"
         thread.dead_paths.add(path)
-
         original_dev = at.VialDevice
 
         class FakeDev:
@@ -555,6 +554,140 @@ class TestStartupPopupGuard(unittest.TestCase):
         self.assertIn("show", kinds)
         self.assertIn(("modality", Qt.NonModal), calls)
         self.assertIn("_comm_dead_box", w.__dict__)
+
+
+class TestMarkDeadRecursionGuard(unittest.TestCase):
+    """判死链的同步递归防线。
+
+    真实崩溃现场（启动后无窗口、进程永不返回）：
+        select_device → 打开设备失败 → mark_dead → update
+          → devices_updated → MainWindow.on_devices_updated（hard_refresh）
+          → on_device_selected → select_device → 打开同一设备失败 → ...
+    实测嵌套深度持续增长至 14+ 且从不回退。这两个测试锁死"只进入一次"。
+    """
+
+    def test_mark_dead_does_not_reenter_update(self):
+        """mark_dead 触发的刷新若再回调 mark_dead，不得形成递归。
+
+        忠实复刻真实循环：每次进入都用一个**尚未拉黑**的新 path（真实场景里
+        设备不断被重新枚举出来，永远不是"已经在黑名单里"），所以
+        _record_probe_result 每次都返回 True 并再次触发 update。没有闸门时
+        这里会一路递归到 RecursionError。
+        """
+        import autorefresh.autorefresh_thread as at
+
+        thread = at.AutorefreshThread()
+
+        depth = {"n": 0, "max": 0}
+        original_update = at.AutorefreshThread.update
+        original_record = at.AutorefreshThread._record_probe_result
+
+        def always_record(self, path, current_path, ok, blacklist_now=False):
+            # 每轮都当成"新判死"（真实场景：设备反复被枚举、反复打不开）
+            return True
+
+        def reentrant_update(self, quiet=True, hard=False):
+            depth["n"] += 1
+            depth["max"] = max(depth["max"], depth["n"])
+            try:
+                # 模拟 update → devices_updated → on_device_selected
+                #      → select_device 打开失败 → mark_dead（新 path）
+                if depth["n"] < 200:
+                    self.mark_dead(b"/path/loop-%d" % depth["n"])
+            finally:
+                depth["n"] -= 1
+
+        at.AutorefreshThread.update = reentrant_update
+        at.AutorefreshThread._record_probe_result = always_record
+        try:
+            thread.mark_dead(b"/path/loop-0")
+        finally:
+            at.AutorefreshThread.update = original_update
+            at.AutorefreshThread._record_probe_result = original_record
+
+        # 有闸门：外层 update 只跑一次，重入被挡住，深度不增长
+        self.assertEqual(depth["max"], 1)
+        # 闸门已释放，不会把后续正常判死也永久挡掉
+        self.assertFalse(thread._in_mark_dead)
+
+    def test_mark_dead_guard_released_after_exception(self):
+        """update 抛异常也要释放闸门，否则之后再也判不死设备。"""
+        import autorefresh.autorefresh_thread as at
+
+        thread = at.AutorefreshThread()
+        original_update = at.AutorefreshThread.update
+
+        def boom(self, quiet=True, hard=False):
+            raise RuntimeError("refresh failed")
+
+        at.AutorefreshThread.update = boom
+        try:
+            with self.assertRaises(RuntimeError):
+                thread.mark_dead(b"/path/boom")
+        finally:
+            at.AutorefreshThread.update = original_update
+
+        self.assertFalse(thread._in_mark_dead)
+
+    def test_select_device_skips_blacklisted(self):
+        """黑名单设备不再尝试打开：避免"刷新→打开失败→刷新"再次成环。"""
+        import autorefresh.autorefresh as ar
+
+        opened = []
+
+        class Dev:
+            desc = {"path": b"/path/blacklisted"}
+            sideload = False
+            via_stack = False
+
+            def open(self, override=None):
+                opened.append("open")
+
+            def close(self):
+                pass
+
+        ar_inst = ar.Autorefresh.__new__(ar.Autorefresh)
+        ar_inst.current_device = None
+        ar_inst.devices = [Dev()]
+        ar_inst.thread = type("T", (), {
+            "dead_paths": {b"/path/blacklisted"},
+            "set_device": lambda self, d: None,
+        })()
+
+        ar_inst.select_device(0)
+
+        self.assertEqual(opened, [])              # 没有尝试打开
+        self.assertIsNone(ar_inst.current_device)
+
+    def test_select_device_opens_when_not_blacklisted(self):
+        """不在黑名单的设备照常打开（守卫不能误伤正常路径）。"""
+        import autorefresh.autorefresh as ar
+
+        opened = []
+
+        class Dev:
+            desc = {"path": b"/path/ok"}
+            sideload = False
+            via_stack = False
+
+            def open(self, override=None):
+                opened.append("open")
+
+            def close(self):
+                pass
+
+        ar_inst = ar.Autorefresh.__new__(ar.Autorefresh)
+        ar_inst.current_device = None
+        ar_inst.devices = [Dev()]
+        ar_inst.thread = type("T", (), {
+            "dead_paths": set(),
+            "set_device": lambda self, d: None,
+        })()
+
+        ar_inst.select_device(0)
+
+        self.assertEqual(opened, ["open"])
+        self.assertIsNotNone(ar_inst.current_device)
 
 
 if __name__ == "__main__":
