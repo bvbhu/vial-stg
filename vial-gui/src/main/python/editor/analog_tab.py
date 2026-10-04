@@ -367,10 +367,15 @@ class TravelProgressBar(QWidget):
         # 标注矩形宽度按字体实测（L-14）：固定 80px 在英文模式("Actuation point" ≈
         # 112px)会截断，中文("触发点")又余量过大。按两行(名称/数值)中最宽串定宽。
         fm = QFontMetrics(qp.font())
+        # 兼容老绑定：只有 width() 的 QFontMetrics 也要能画（见 _advance_of）
+        measure = _advance_of(fm)
         label_w = 80
         for name, v in (("rel", self.release), ("act", self.actuation)):
             label = tr("AnalogTab", "Release point") if name == "rel" else tr("AnalogTab", "Actuation point")
-            label_w = max(label_w, fm.horizontalAdvance(label), fm.horizontalAdvance(str(v)))
+            if measure is None:
+                pass  # 度量不可用：保持 80px 兜底宽度，不截断中文
+            else:
+                label_w = max(label_w, measure(label), measure(str(v)))
         for name, v, ly in (("rel", self.release, ly_rel), ("act", self.actuation, ly_act)):
             y = self._y_of(v)
             if not overlap:
@@ -1674,3 +1679,16 @@ class AnalogTab(BasicEditor):
             cfg = self.configs.get(self.selected)
             self._load_config_to_ui(cfg if cfg is not None else AnalogKeyConfig())
         self._flash_status(tr("AnalogTab", "All keys reset to defaults"))
+
+
+# ---------------------------------------------------------------- helpers ----
+
+def _advance_of(fm):
+    """取"量文本宽度"的函数：新 Qt 用 horizontalAdvance，旧 Qt 只有 width()。
+
+    实现端运行时只能依赖 PyQt5 绑定对象，而绑定对象是否带 horizontalAdvance
+    取决于它编译时链接的 Qt 版本，不同打包环境不一致。一旦缺失，AttributeError
+    会在 paintEvent 里直接弹框断开绘图，所以这里只做属性探测，拿不到就退回
+    width()，再拿不到返回 None。
+    """
+    return getattr(fm, "horizontalAdvance", None) or getattr(fm, "width", None)
