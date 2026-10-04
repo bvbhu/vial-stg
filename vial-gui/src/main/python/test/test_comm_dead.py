@@ -386,5 +386,117 @@ class TestAutorefreshDeadFilter(unittest.TestCase):
             ar._comm_failure_handling = False
 
 
+class TestPollResponsiveness(unittest.TestCase):
+    """L-10 修正：响应性参数不能为"防掉线卡死"而压得过狠。
+
+    100ms 读超时 + 50ms 重试等待在蓝牙空口下会误杀正常回包（空口有数十毫秒
+    抖动），重发又叠加等待，表现为行程读数慢半拍。这些测试把"正常链路一次读成"
+    和"掉线最坏阻塞可控"两个约束都钉住，避免以后又被单侧优化调回去。
+    """
+
+    def test_read_timeout_is_generous_enough_for_ble(self):
+        """读超时必须容得下蓝牙空口的正常抖动（>100ms，取 500ms）。"""
+        import util
+
+        self.assertGreaterEqual(util._READ_TIMEOUT_MS, 300)
+
+    def test_healthy_link_completes_in_one_attempt(self):
+        """正常链路：一次写 + 一次读就返回，不触发任何重试等待。"""
+        import util
+
+        sleeps = []
+        original_sleep = util.time.sleep
+        util.time.sleep = lambda s: sleeps.append(s)
+        try:
+            attempts = []
+
+            class Dev:
+                def write(self, b):
+                    attempts.append("w")
+                    return util.MSG_LEN + 1
+
+                def read(self, n, timeout_ms=None):
+                    attempts.append(("r", timeout_ms))
+                    return b"\x01" * n
+
+            data = util.hid_send(Dev(), b"\xFE\x04", retries=3)
+        finally:
+            util.time.sleep = original_sleep
+
+        self.assertEqual(len(data), util.MSG_LEN)
+        # 恰好一次写 + 一次读：没有重发，也就没有重试等待
+        self.assertEqual(attempts, ["w", ("r", util._READ_TIMEOUT_MS)])
+        self.assertEqual(sleeps, [])
+
+    def test_worst_case_block_matches_retries_and_timeout(self):
+        """掉线最坏阻塞 = retries × (读超时 + 重试等待)，必须留在秒级以内。
+
+        调用方的掉线路径用 retries=3，超出这个量级就会饿死 Qt 事件循环。
+        """
+        import util
+
+        sleeps = []
+        original_sleep = util.time.sleep
+        util.time.sleep = lambda s: sleeps.append(s)
+        try:
+            class Dead:
+                def write(self, b):
+                    return util.MSG_LEN + 1
+
+                def read(self, n, timeout_ms=None):
+                    return b""  # 设备无响应
+
+            with self.assertRaises(RuntimeError):
+                util.hid_send(Dead(), b"\xFE\x04", retries=3)
+        finally:
+            util.time.sleep = original_sleep
+
+        # 3 次尝试：第 1 次不等待，后 2 次各等一次重试间隔
+        self.assertEqual(len(sleeps), 2)
+        worst = 3 * (util._READ_TIMEOUT_MS / 1000.0) + 2 * util._RETRY_SLEEP_S
+        self.assertLess(worst, 3.0)
+
+    def test_travel_throttle_does_not_slow_fast_links(self):
+        """全键可视化：链路快时节流退化为 tick 间隔（≈未节流的初版）。
+
+        旧的"每秒往返数预算"在 80 键宽域下恒为 300ms，即使链路本来很快也被
+        强按到 3fps——这是用户感知"刷新变慢"的直接来源。
+        """
+        from editor.analog_tab import AnalogTab
+
+        tick = AnalogTab._POLL_INTERVAL_NORMAL / 1000.0
+        # 实测帧耗时 5ms（链路良好）：节流不得把帧周期压到超过 2 个 tick
+        interval = AnalogTab._travel_frame_interval(AnalogTab, 0.005)
+        self.assertLessEqual(max(tick, interval), tick * 2)
+
+    def test_travel_throttle_still_protects_slow_links(self):
+        """全键可视化：单帧耗时长时节流仍放开周期，避免饿死重绘。"""
+        from editor.analog_tab import AnalogTab
+
+        # 实测帧耗时 300ms（链路拥塞）：周期应显著长于耗时本身
+        interval = AnalogTab._travel_frame_interval(AnalogTab, 0.3)
+        self.assertGreater(interval, 0.3)
+        # 占空比守上限：帧耗时占比不超过 1/_TRAVEL_FRAME_DUTY
+        self.assertLessEqual(0.3 / (0.3 + interval), 1.0 / AnalogTab._TRAVEL_FRAME_DUTY + 1e-9)
+
+    def test_travel_throttle_uses_latest_frame_not_average(self):
+        """链路一旦变快，节流必须一帧之内跟上（不做滑动平均）。"""
+        from editor.analog_tab import AnalogTab
+
+        tab = AnalogTab.__new__(AnalogTab)
+        tab._travel_next_at = 0.0
+
+        # 先前很慢，然后一帧很快 —— 下一次排程只认这一帧
+        AnalogTab._note_travel_success(tab, 0.2)
+        slow_gate = tab._travel_next_at
+        AnalogTab._note_travel_success(tab, 0.002)
+        fast_gate = tab._travel_next_at
+
+        import time
+        now = time.monotonic()
+        self.assertGreater(slow_gate - now, 0.4)   # 慢帧：周期被放长
+        self.assertLess(fast_gate - now, 0.03)     # 快帧：立刻回到 tick 量级
+
+
 if __name__ == "__main__":
     unittest.main()

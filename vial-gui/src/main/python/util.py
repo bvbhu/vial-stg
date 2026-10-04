@@ -40,6 +40,20 @@ EXAMPLE_KEYBOARDS = [
 EXAMPLE_KEYBOARD_PREFIX = 0xA6867BDFD3B00F
 
 
+# 读超时与重试等待：hidapi 的 dev.read() 是阻塞调用，这两个值直接决定"设备
+# 无响应时单次命令要卡住 UI 线程多久"，因此它们同时是**响应性**参数和**掉线
+# 抗性**参数，必须一起调：
+#   - 100ms/50ms（曾经为防掉线卡死而取的值）在蓝牙空口下过于激进。空口本身
+#     有数十毫秒的调度抖动，正常回包偶尔也会超出 100ms，于是本来成功的读被判
+#     失败并重发——重发又叠加 50ms 等待，行程读数因此变"慢半拍"。回到 500ms/0.5s
+#     后正常链路一次读成，不再误重发。
+#   - 掉线时单次最坏阻塞 = retries×(超时 + 等待) ≈ 3×0.6s = 1.8s。这是本函数
+#     在 UI 线程上最坏要待的时长，由调用方控制：掉线路径一律用 retries=3（而不是
+#     20），失败后进入通信冷却不再连续重试（见 editor/analog_tab.py）。
+_READ_TIMEOUT_MS = 500
+_RETRY_SLEEP_S = 0.5
+
+
 def hid_send(dev, msg, retries=1):
     if len(msg) > MSG_LEN:
         raise RuntimeError("message must be less than 32 bytes")
@@ -51,17 +65,14 @@ def hid_send(dev, msg, retries=1):
     while retries > 0:
         retries -= 1
         if not first:
-            # 重试等待从 0.5s 大幅缩短：本函数在 Qt 主线程执行，
-            # 设备无响应（如切蓝牙后固件把 raw HID 回包切走）时，
-            # 长 sleep 会饿死事件循环，表现为 GUI"未响应/卡死"。
-            time.sleep(0.05)
+            time.sleep(_RETRY_SLEEP_S)
         first = False
         try:
             # add 00 at start for hidapi report id
             if dev.write(b"\x00" + msg) != MSG_LEN + 1:
                 continue
 
-            data = bytes(dev.read(MSG_LEN, timeout_ms=100))
+            data = bytes(dev.read(MSG_LEN, timeout_ms=_READ_TIMEOUT_MS))
             if not data:
                 continue
         except OSError:

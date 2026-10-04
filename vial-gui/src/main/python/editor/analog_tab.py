@@ -44,7 +44,7 @@ from protocol.constants import (ANALOG_AXIS_NONE, ANALOG_FLAG_RT_ENABLED,
                                 ANALOG_CAL_BOTTOM_OUT_ON, ANALOG_CAL_BOTTOM_OUT_OFF,
                                 ANALOG_CAP_BOTTOM_OUT_CAL,
                                 ANALOG_PROTOCOL_VERSION)
-from protocol.analog import AnalogKeyConfig, ANALOG_DEFAULT_MAX_TRAVEL, analog_reading_entry_size
+from protocol.analog import AnalogKeyConfig, ANALOG_DEFAULT_MAX_TRAVEL
 from unlocker import Unlocker
 
 
@@ -844,45 +844,41 @@ class AnalogTab(BasicEditor):
 
     # ------------------------------------------------------------ interface
     _POLL_INTERVAL_NORMAL = 20    # 常规轮询间隔(ms)：单键行程 + 矩阵高亮
-    # 全键行程可视化每帧往返数 ≈ ceil(num_keys / max_readings)。往返数越多，单帧越重，
-    # 轮询周期应随之放长，否则键数翻倍时帧率翻倍、卡顿预算同倍恶化。
-    # 卡顿预算按“每秒往返数”定死（而非帧率）：本板 80 键宽域 = 12 往返/帧，
-    # 基准 20ms 帧周期 ≈ 25 往返/秒。键数增加（或窄域条目变多）时帧周期自动放长，
-    # 每秒往返数维持预算；反之键数减少时帧率回升。
-    _POLL_BUDGET_ROUNDTRIPS_PER_SEC = 40  # 全键行程可视化每秒往返数上限（≈2.5fps @ 80键宽域 / 2fps @ 100键宽域）
+    # 全键行程可视化节流：帧周期不再按"每秒往返数预算"静态反推（那样在 80 键
+    # 宽域下恒为 300ms，比未节流的初版慢一个数量级），而是由**实测帧耗时**驱动。
+    # 一帧 N 个往返本身就是硬串行的传输成本，节流只需保证 UI 有时间重绘：
+    # 帧周期 = max(_POLL_INTERVAL_NORMAL, 最近帧耗时 × _TRAVEL_FRAME_DUTY)。
+    # 链路快 → 帧周期自动收到 20ms（≈未节流的初版）；链路慢 → 帧周期随之放长，
+    # 单帧占比仍守着占比上限，重绘不会被饿死。
+    # 关键：帧耗时用**最近一次**而非滑动平均——链路变快时平均要好几帧才能爬回来，
+    # 而只取最近一次则一帧之内就跟上（表现为"链路一好立刻满速"）。
+    _TRAVEL_FRAME_DUTY = 4        # 帧周期 = 帧耗时 × 4（单帧最多占 1/4 时间，余下留给重绘/事件）
     _POLL_BACKOFF_MS = 200        # 一次读取失败后的通信冷却(ms)：冷却期内完全不访问设备（矩阵+行程），掉线阻塞稀疏化
 
-    @staticmethod
-    def _poll_all_travel_frame_roundtrips(num_keys, max_readings, max_travel):
-        """全键行程可视化一帧的往返数：ceil(num_keys / max_readings)；
-        未握手拿不到 max_readings 时按窄域单包上限(31/条目字节)兜底。"""
-        if max_readings <= 0:
-            max_readings = 31 // analog_reading_entry_size(max_travel)
-        return (num_keys + max_readings - 1) // max_readings
-
     def _apply_poll_interval(self):
-        """按当前负载算出轮询间隔，套到 _timer 上。
+        """普通模式固定 20ms tick。
 
-        全键行程可视化模式：每秒往返数受 _POLL_BUDGET_ROUNDTRIPS_PER_SEC 限制
-        （键数/行程域宽度共同决定单帧往返数）；普通模式（单键行程 +
-        矩阵高亮 = 每帧 2 个往返）回到 _POLL_INTERVAL_NORMAL。
-        由重建/开关可视化时调用。
+        全键行程可视化的节流不再改 tick 周期，而是由 _note_travel_success()
+        按实测帧耗时逐帧排程（见 _travel_frame_interval），所以这里只需常态值：
+        计时器跑得快，节流闸门才能精确到 20ms 粒度。
         """
-        if self.caps is None:
-            return
-        if self.chk_debug.isChecked():
-            trips = self._poll_all_travel_frame_roundtrips(
-                self.num_keys, int(self.caps.get("max_readings", 0) or 0), self.max_travel)
-            interval = max(self._POLL_INTERVAL_NORMAL,
-                           int(round(trips * 1000.0 / self._POLL_BUDGET_ROUNDTRIPS_PER_SEC)))
-        else:
-            interval = self._POLL_INTERVAL_NORMAL
-        self._set_poll_interval(interval)
+        self._set_poll_interval(self._POLL_INTERVAL_NORMAL)
 
     def _set_poll_interval(self, interval):
         if interval != self._poll_interval:
             self._poll_interval = interval
             self._timer.setInterval(interval)
+
+    def _travel_frame_interval(self, elapsed):
+        """按上一帧实测耗时(秒)算下一帧的节流间隔(秒)。
+
+        帧耗时含"整帧 N 个往返的串行传输 + 应用"，即节流真正要摊平的成本；
+        乘以占空比倒数后，单帧占用不超过 1/_TRAVEL_FRAME_DUTY。返回 0 表示
+        不做额外节流（按 tick 间隔跑，即用户感知的满速）。
+        """
+        if elapsed <= 0:
+            return 0.0
+        return max(0.0, elapsed * self._TRAVEL_FRAME_DUTY - elapsed)
 
     def _apply_max_travel(self, max_travel):
         """把固件上报的行程域最大键程值铺给所有以"行程"为单位的控件。
@@ -1367,13 +1363,15 @@ class AnalogTab(BasicEditor):
         # ② 可视化显示全键行程：全键实时行程柱状图(每帧约 num_keys/max_readings 个往返)
         if self.chk_debug.isChecked():
             if not self._travel_poll_due():
-                return  # 全键帧按往返预算节流，未到点则本轮只做矩阵高亮
+                return  # 全键帧按上一帧实测耗时节流，未到点则本轮只做矩阵高亮
+            t0 = time.monotonic()
             try:
                 frame = self.device.keyboard.analog_get_all_key_readings()
             except Exception:
                 self._note_travel_failure()
                 return
-            self._note_travel_success()
+            # 含整帧传输耗时：节流按真实成本排下一帧，而不是按静态往返数猜
+            self._note_travel_success(time.monotonic() - t0)
             self._poll_all_travel_apply(frame)
             return
         # ③ 选中键的实时行程读数（analog 命令不受 unlock 门控，照常轮询）。
@@ -1397,16 +1395,14 @@ class AnalogTab(BasicEditor):
     def _travel_poll_due(self):
         """全键行程可视化模式：是否到了下一帧的节流时刻。
 
-        全键帧一帧 N 个往返（N=ceil(num_keys/max_readings)），秒级往返总量受
-        _POLL_BUDGET_ROUNDTRIPS_PER_SEC 限制，帧周期 = N×1000/预算 ms。矩阵
-        高亮不受此节流（20ms 独立 tick）。普通模式的单键行程读取不走本闸门。
+        节流间隔由 _note_travel_success() 按上一帧实测耗时逐帧排程；矩阵高亮
+        不受此闸门（按 20ms tick 独立跑）。普通模式的单键行程读取不走本闸门。
         """
         return time.monotonic() >= self._travel_next_at
 
-    def _note_travel_success(self):
-        """一次全键帧读取成功：按当前往返预算排下一帧。"""
-        interval = max(1, (self._poll_interval or self._POLL_INTERVAL_NORMAL))
-        self._travel_next_at = time.monotonic() + interval / 1000.0
+    def _note_travel_success(self, elapsed=0.0):
+        """一次全键帧读取成功：按刚测到的帧耗时排下一帧。"""
+        self._travel_next_at = time.monotonic() + self._travel_frame_interval(elapsed)
 
     def _note_travel_failure(self):
         """一次行程读取失败（异常）：进入通信冷却（弹窗由 autorefresh 拉黑时统一触发）。"""
