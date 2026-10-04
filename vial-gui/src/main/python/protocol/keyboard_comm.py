@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 import struct
 import json
+import logging
 import lzma
 import time
 from collections import OrderedDict
@@ -49,6 +50,9 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
         self.comm_dead = False
         self._comm_failures_threshold = 3
         self._comm_success_clear = True
+        # 诊断标签：本 Keyboard 对应哪个设备的收发。异常由全局钩子接住时只带
+        # traceback，没有这个标签就无法定位是哪个设备出的问题。
+        self._comm_label = getattr(dev, "path", None)
         self.usb_send = self._make_usb_send_wrapper(usb_send)
 
         # n.b. using OrderedDict here to make order of layout requests consistent for tests
@@ -93,6 +97,12 @@ class Keyboard(ProtocolMacro, ProtocolDynamic, ProtocolTapDance, ProtocolCombo, 
                 self._comm_failures += 1
                 if self._comm_failures >= self._comm_failures_threshold:
                     self.comm_dead = True
+                # 记下是哪个设备、哪条命令失败的：异常冒泡到全局钩子后只剩
+                # traceback，没有这个标签就没法定位是哪台设备在报错。
+                # args = (dev, msg, retries=...)，msg 前两字节是命令码。
+                msg = args[1] if len(args) > 1 else b""
+                logging.error("usb_send failed on device %s (failures=%d, cmd=%s)",
+                              self._comm_label, self._comm_failures, msg[:4].hex())
                 raise
             if self._comm_success_clear:
                 self._comm_failures = 0

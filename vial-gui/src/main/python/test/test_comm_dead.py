@@ -498,5 +498,64 @@ class TestPollResponsiveness(unittest.TestCase):
         self.assertLess(fast_gate - now, 0.03)     # 快帧：立刻回到 tick 量级
 
 
+class TestStartupPopupGuard(unittest.TestCase):
+    """启动早期（主窗口尚未 show）不得弹「键盘无响应」。
+
+    构造 MainWindow 时 autorefresh 线程已在跑，任何设备探测失败都会走到
+    on_device_comm_dead。给未 show 的父窗口挂模态子框，就是"启动即弹窗/卡住"
+    的经典成因。这个测试直接调槽函数验证守卫，不起真实窗口。
+    """
+
+    def _make_window(self, visible):
+        import main_window as mw
+
+        calls = []
+
+        class Box:
+            # 复制真实 QMessageBox 的类常量，避免替换时把 Warning/Ok 一起打掉
+            Warning = mw.QMessageBox.Warning
+            Ok = mw.QMessageBox.Ok
+            calls = None
+
+            def __init__(self, *a, **k):
+                type(self).calls.append(("box", a))
+
+            def setWindowModality(self, m):
+                type(self).calls.append(("modality", m))
+
+            def show(self):
+                type(self).calls.append(("show", None))
+
+        Box.calls = calls
+
+        w = mw.MainWindow.__new__(mw.MainWindow)
+        w.isVisible = lambda: visible   # 实例属性遮蔽方法（仅本测试用）
+
+        original = mw.QMessageBox
+        mw.QMessageBox = Box
+        try:
+            w.on_device_comm_dead()
+        finally:
+            mw.QMessageBox = original
+        return w, calls
+
+    def test_no_popup_before_window_shown(self):
+        """未 show()：不构造任何弹窗（启动早期探测失败不算用户可见事件）。"""
+        w, calls = self._make_window(visible=False)
+        self.assertEqual(calls, [])
+        self.assertNotIn("_comm_dead_box", w.__dict__)
+
+    def test_popup_shown_once_visible(self):
+        """已 show()：正常弹非模态框，且存实例引用防 GC（防"一闪而过"）。"""
+        from PyQt5.QtCore import Qt
+
+        w, calls = self._make_window(visible=True)
+        kinds = [c[0] for c in calls]
+        self.assertIn("box", kinds)
+        self.assertIn("show", kinds)
+        self.assertIn(("modality", Qt.NonModal), calls)
+        self.assertIn("_comm_dead_box", w.__dict__)
+
+
 if __name__ == "__main__":
     unittest.main()

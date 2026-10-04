@@ -323,6 +323,12 @@ class MainWindow(QMainWindow):
         弹窗框必须存实例引用（self._comm_dead_box）：非模态框方法返回后若无
         引用，Python GC 会把它回收销毁——表现为"一闪而过"。
         """
+        # 启动早期不弹：此时主窗口尚未 show()，构造过程中的任何设备探测失败
+        # 都会走到这里。给一个未 show 的父窗口挂模态子框，就是"启动即弹窗/卡住"
+        # 的经典成因；而且用户还没开始操作，提示也没有意义。
+        if not self.isVisible():
+            logging.info("Device marked comm_dead before main window was shown; skipping popup")
+            return
         self._comm_dead_box = QMessageBox(
             QMessageBox.Warning,
             tr("MainWindow", "Keyboard is not responding"),

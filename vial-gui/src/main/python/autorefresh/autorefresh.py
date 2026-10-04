@@ -11,9 +11,10 @@ _comm_failure_handling = False
 def handle_comm_failure():
     """通信失联统一兜底：拉黑当前设备并触发刷新（崩溃拦截用）。
 
-    设备切蓝牙/拔线后，UI 槽内任何 usb_send 都会快速失败（100ms 超时）并抛
-    RuntimeError。本函数把它转成"设备已断开"的常规处理：拉黑 + 刷新列表 +
-    回退到无设备状态，而不是让异常冒泡导致 PyQt5 中止进程。
+    设备切蓝牙/拔线后，UI 槽内任何 usb_send 都会快速失败并抛 RuntimeError
+    （掉线路径 `retries=3`，最坏阻塞 ≈3×0.6s 后失败，见 util.hid_send）。本函数把它
+    转成"设备已断开"的常规处理：拉黑 + 刷新列表 + 回退到无设备状态，而不是让
+    异常冒泡导致 PyQt5 中止进程。
     """
     global _comm_failure_handling
     if _comm_failure_handling:
